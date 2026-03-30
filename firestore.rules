@@ -1,0 +1,173 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users
+// Document ID: userId (Firebase Auth UID)
+// Fields:
+//   - uid: string (required)
+//   - email: string (required, email format)
+//   - displayName: string (optional)
+//   - role: string (required, 'student' | 'admin')
+//   - lastLoginAt: string (optional, date-time)
+//   - currentSessionId: string (optional)
+//
+// Collection: courses
+// Document ID: courseId
+// Fields:
+//   - title: string (required)
+//   - description: string (optional)
+//   - category: string (required)
+//   - subject: string (optional)
+//   - instructor: string (optional)
+//   - price: number (required)
+//   - validityDays: number (optional)
+//   - thumbnailUrl: string (optional, uri)
+//   - createdAt: string (optional, date-time)
+//
+// Collection: courses/{courseId}/lessons
+// Document ID: lessonId
+// Fields:
+//   - courseId: string (required)
+//   - title: string (required)
+//   - description: string (optional)
+//   - videoUrl: string (optional)
+//   - order: number (required)
+//   - type: string (required, 'video' | 'pdf' | 'quiz')
+//
+// Collection: enrollments
+// Document ID: enrollmentId
+// Fields:
+//   - userId: string (required)
+//   - courseId: string (required)
+//   - enrolledAt: string (required, date-time)
+//   - expiresAt: string (required, date-time)
+//
+// Collection: tests
+// Document ID: testId
+// Fields:
+//   - title: string (required)
+//   - description: string (optional)
+//   - category: string (required)
+//   - durationMinutes: number (required)
+//   - totalMarks: number (optional)
+//   - negativeMarking: number (optional)
+//   - createdAt: string (optional, date-time)
+//
+// Collection: tests/{testId}/questions
+// Document ID: questionId
+// Fields:
+//   - testId: string (required)
+//   - questionText: string (required)
+//   - options: list (required)
+//   - correctOption: number (required)
+//   - explanation: string (optional)
+//   - marks: number (optional)
+//
+// Collection: attempts
+// Document ID: attemptId
+// Fields:
+//   - userId: string (required)
+//   - testId: string (required)
+//   - score: number (optional)
+//   - rank: number (optional)
+//   - answers: map (optional)
+//   - startedAt: string (required, date-time)
+//   - completedAt: string (optional, date-time)
+//
+// ===============================================================
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "anudeepreddypolu@gmail.com" && request.auth.token.email_verified == true));
+    }
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+    function hasRequiredFields(data, fields) {
+      return data.keys().hasAll(fields);
+    }
+
+    // Domain Validators
+    function isValidUser(data) {
+      return hasRequiredFields(data, ['uid', 'email', 'role']) &&
+             data.uid is string &&
+             data.email is string && isValidEmail(data.email) &&
+             data.role in ['student', 'admin'] &&
+             data.uid.size() < 128 && data.email.size() < 256;
+    }
+    function isValidCourse(data) {
+      return hasRequiredFields(data, ['title', 'category', 'price']) &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.category is string && data.category.size() < 100 &&
+             data.price is number && data.price >= 0;
+    }
+    function isValidEnrollment(data) {
+      return hasRequiredFields(data, ['userId', 'courseId', 'enrolledAt', 'expiresAt']) &&
+             data.userId is string && data.courseId is string &&
+             data.enrolledAt is string && data.expiresAt is string;
+    }
+    function isValidAttempt(data) {
+      return hasRequiredFields(data, ['userId', 'testId', 'startedAt']) &&
+             data.userId is string && data.testId is string &&
+             data.startedAt is string;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if (isOwner(userId) && isValidUser(request.resource.data) && request.resource.data.role == 'student') || isAdmin();
+      allow update: if (isOwner(userId) && isValidUser(request.resource.data) && request.resource.data.role == resource.data.role) || isAdmin();
+    }
+
+    match /courses/{courseId} {
+      allow read: if true;
+      allow create: if isAdmin() && isValidCourse(request.resource.data);
+      allow update: if isAdmin() && isValidCourse(request.resource.data);
+      allow delete: if isAdmin();
+      
+      match /lessons/{lessonId} {
+        allow read: if true;
+        allow write: if isAdmin();
+      }
+    }
+
+    match /enrollments/{enrollmentId} {
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.userId || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && isValidEnrollment(request.resource.data);
+      allow update, delete: if isAdmin();
+    }
+
+    match /tests/{testId} {
+      allow read: if true;
+      allow write: if isAdmin();
+      
+      match /questions/{questionId} {
+        allow read: if isAuthenticated();
+        allow write: if isAdmin();
+      }
+    }
+
+    match /attempts/{attemptId} {
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.userId || isAdmin());
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && isValidAttempt(request.resource.data);
+      allow update: if isAdmin();
+    }
+  }
+}

@@ -1,0 +1,70 @@
+import React, { createContext, useContext, useEffect, useState } from 'react';
+import { EduService } from './EduService';
+import { AuthUser, RegisterPayload } from './types';
+
+interface AuthContextType {
+  user: AuthUser | null;
+  loading: boolean;
+  isAdmin: boolean;
+  login: (email: string, password: string) => Promise<void>;
+  register: (payload: RegisterPayload) => Promise<void>;
+  logout: () => Promise<void>;
+  refreshSession: () => Promise<void>;
+}
+
+const AuthContext = createContext<AuthContextType>({
+  user: null,
+  loading: true,
+  isAdmin: false,
+  login: async () => {},
+  register: async () => {},
+  logout: async () => {},
+  refreshSession: async () => {},
+});
+
+export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const refreshSession = async () => {
+    const sessionUser = await EduService.restoreSession();
+    setUser(sessionUser);
+  };
+
+  useEffect(() => {
+    refreshSession().finally(() => setLoading(false));
+  }, []);
+
+  const login = async (email: string, password: string) => {
+    const response = await EduService.login(email, password);
+    setUser(response.user);
+  };
+
+  const register = async (payload: RegisterPayload) => {
+    const response = await EduService.register(payload);
+    setUser(response.user);
+  };
+
+  const logout = async () => {
+    await EduService.logout();
+    setUser(null);
+  };
+
+  return (
+    <AuthContext.Provider
+      value={{
+        user,
+        loading,
+        isAdmin: user?.role === 'admin',
+        login,
+        register,
+        logout,
+        refreshSession,
+      }}
+    >
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+export const useAuth = () => useContext(AuthContext);

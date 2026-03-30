@@ -1,0 +1,292 @@
+const net = require('net');
+const { URL } = require('url');
+const { appConfig } = require('./config.js');
+
+const parseRedisTarget = () => {
+  if (!appConfig.redisUrl) {
+    return null;
+  }
+
+  try {
+    const url = new URL(appConfig.redisUrl);
+    return {
+      host: url.hostname,
+      port: Number(url.port || 6379),
+      password: url.password || null,
+    };
+  } catch {
+    return null;
+  }
+};
+
+const writeResp = (socket, commandParts) => {
+  const payload = [`*${commandParts.length}`];
+  commandParts.forEach((part) => {
+    const value = String(part);
+    payload.push(`$${Buffer.byteLength(value)}`);
+    payload.push(value);
+  });
+  socket.write(`${payload.join('\r\n')}\r\n`);
+};
+
+const parseResp = (buffer, offset = 0) => {
+  if (offset >= buffer.length) {
+    return null;
+  }
+
+  const type = String.fromCharCode(buffer[offset]);
+  const findCrlf = (start) => buffer.indexOf('\r\n', start, 'utf8');
+  const lineEnd = findCrlf(offset);
+
+  if (lineEnd === -1) {
+    return null;
+  }
+
+  if (type === '+') {
+    return {
+      value: buffer.toString('utf8', offset + 1, lineEnd),
+      bytesConsumed: lineEnd + 2 - offset,
+    };
+  }
+
+  if (type === '-') {
+    return {
+      error: new Error(buffer.toString('utf8', offset + 1, lineEnd)),
+      bytesConsumed: lineEnd + 2 - offset,
+    };
+  }
+
+  if (type === ':') {
+    return {
+      value: Number(buffer.toString('utf8', offset + 1, lineEnd)),
+      bytesConsumed: lineEnd + 2 - offset,
+    };
+  }
+
+  if (type === '$') {
+    const length = Number(buffer.toString('utf8', offset + 1, lineEnd));
+    if (length === -1) {
+      return {
+        value: null,
+        bytesConsumed: lineEnd + 2 - offset,
+      };
+    }
+
+    const bodyStart = lineEnd + 2;
+    const bodyEnd = bodyStart + length;
+    if (buffer.length < bodyEnd + 2) {
+      return null;
+    }
+
+    return {
+      value: buffer.toString('utf8', bodyStart, bodyEnd),
+      bytesConsumed: bodyEnd + 2 - offset,
+    };
+  }
+
+  if (type === '*') {
+    const length = Number(buffer.toString('utf8', offset + 1, lineEnd));
+    let cursor = lineEnd + 2;
+    const values = [];
+
+    for (let index = 0; index < length; index += 1) {
+      const parsed = parseResp(buffer, cursor);
+      if (!parsed) {
+        return null;
+      }
+
+      if (parsed.error) {
+        return parsed;
+      }
+
+      values.push(parsed.value);
+      cursor += parsed.bytesConsumed;
+    }
+
+    return {
+      value: values,
+      bytesConsumed: cursor - offset,
+    };
+  }
+
+  return {
+    error: new Error(`Unsupported Redis response type: ${type}`),
+    bytesConsumed: buffer.length - offset,
+  };
+};
+
+const executeRedisCommand = async (commandParts) => {
+  const target = parseRedisTarget();
+  if (!target) {
+    return null;
+  }
+
+  return new Promise((resolve, reject) => {
+    const socket = net.createConnection({ host: target.host, port: target.port });
+    let settled = false;
+    let authPending = Boolean(target.password);
+    let buffer = Buffer.alloc(0);
+
+    const finish = (error, value) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      socket.destroy();
+      if (error) {
+        reject(error);
+      } else {
+        resolve(value);
+      }
+    };
+
+    socket.setTimeout(5_000);
+
+    socket.on('connect', () => {
+      if (target.password) {
+        writeResp(socket, ['AUTH', target.password]);
+      } else {
+        writeResp(socket, commandParts);
+      }
+    });
+
+    socket.on('data', (chunk) => {
+      buffer = Buffer.concat([buffer, chunk]);
+
+      while (buffer.length > 0) {
+        const parsed = parseResp(buffer);
+        if (!parsed) {
+          return;
+        }
+
+        buffer = buffer.slice(parsed.bytesConsumed);
+
+        if (parsed.error) {
+          finish(parsed.error);
+          return;
+        }
+
+        if (authPending) {
+          authPending = false;
+          writeResp(socket, commandParts);
+          continue;
+        }
+
+        finish(null, parsed.value);
+        return;
+      }
+    });
+
+    socket.on('timeout', () => finish(new Error('Redis connection timed out')));
+    socket.on('error', (error) => finish(error));
+  });
+};
+
+const getRedisValue = async (key) => {
+  if (!parseRedisTarget()) {
+    return null;
+  }
+
+  return executeRedisCommand(['GET', key]);
+};
+
+const setRedisValue = async (key, value, options = {}) => {
+  if (!parseRedisTarget()) {
+    return false;
+  }
+
+  const command = ['SET', key, value];
+  if (Number.isFinite(options.ttlSeconds) && options.ttlSeconds > 0) {
+    command.push('EX', String(options.ttlSeconds));
+  }
+
+  await executeRedisCommand(command);
+  return true;
+};
+
+const deleteRedisKey = async (key) => {
+  if (!parseRedisTarget()) {
+    return false;
+  }
+
+  await executeRedisCommand(['DEL', key]);
+  return true;
+};
+
+const getRedisJson = async (key) => {
+  const raw = await getRedisValue(key);
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+};
+
+const setRedisJson = async (key, value, options = {}) => {
+  return setRedisValue(key, JSON.stringify(value), options);
+};
+
+const checkRedisHealth = async () => {
+  const target = parseRedisTarget();
+  if (!target) {
+    return {
+      enabled: false,
+      status: 'disabled',
+      detail: 'REDIS_URL not configured',
+    };
+  }
+
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: target.host, port: target.port });
+    let settled = false;
+
+    const finish = (status, detail) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      socket.destroy();
+      resolve({
+        enabled: true,
+        status,
+        detail,
+      });
+    };
+
+    socket.setTimeout(5_000);
+
+    socket.on('connect', () => {
+      if (target.password) {
+        writeResp(socket, ['AUTH', target.password]);
+      }
+      writeResp(socket, ['PING']);
+    });
+
+    socket.on('data', (data) => {
+      const response = data.toString('utf8');
+      if (response.includes('+PONG')) {
+        finish('up', `${target.host}:${target.port}`);
+      } else if (response.startsWith('-ERR')) {
+        finish('down', response.trim());
+      }
+    });
+
+    socket.on('timeout', () => finish('down', 'Redis connection timed out'));
+    socket.on('error', (error) => finish('down', error.message));
+  });
+};
+
+module.exports = {
+  checkRedisHealth,
+  getRedisValue,
+  setRedisValue,
+  deleteRedisKey,
+  getRedisJson,
+  setRedisJson,
+};

@@ -1,0 +1,63 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOST: 0.0.0.0
+      APP_URL: http://localhost:3000
+      MONGODB_URI: mongodb://mongo:27017/edumaster
+      POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/edumaster
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: change-me-in-production
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      VITE_STRIPE_PUBLISHABLE_KEY: ${VITE_STRIPE_PUBLISHABLE_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-}
+      TRUST_PROXY: "true"
+      ENVIRONMENT_LABEL: docker-compose
+    depends_on:
+      - mongo
+      - postgres
+      - redis
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: edumaster
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+volumes:
+  mongo-data:
+  postgres-data:
+  redis-data:

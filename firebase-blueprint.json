@@ -1,0 +1,135 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and session tracking",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["student", "admin"] },
+        "lastLoginAt": { "type": "string", "format": "date-time" },
+        "currentSessionId": { "type": "string" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "Course": {
+      "title": "Course",
+      "description": "Educational course details",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "subject": { "type": "string" },
+        "instructor": { "type": "string" },
+        "price": { "type": "number" },
+        "validityDays": { "type": "integer" },
+        "thumbnailUrl": { "type": "string", "format": "uri" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "category", "price"]
+    },
+    "Lesson": {
+      "title": "Lesson",
+      "description": "Individual lesson within a course",
+      "type": "object",
+      "properties": {
+        "courseId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "videoUrl": { "type": "string" },
+        "order": { "type": "integer" },
+        "type": { "type": "string", "enum": ["video", "pdf", "quiz"] }
+      },
+      "required": ["courseId", "title", "order", "type"]
+    },
+    "Enrollment": {
+      "title": "Enrollment",
+      "description": "User enrollment in a course",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "courseId": { "type": "string" },
+        "enrolledAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "courseId", "enrolledAt", "expiresAt"]
+    },
+    "Test": {
+      "title": "Test",
+      "description": "Mock test configuration",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "durationMinutes": { "type": "integer" },
+        "totalMarks": { "type": "integer" },
+        "negativeMarking": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "category", "durationMinutes"]
+    },
+    "Question": {
+      "title": "Question",
+      "description": "Individual question in a test",
+      "type": "object",
+      "properties": {
+        "testId": { "type": "string" },
+        "questionText": { "type": "string" },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "correctOption": { "type": "integer" },
+        "explanation": { "type": "string" },
+        "marks": { "type": "number" }
+      },
+      "required": ["testId", "questionText", "options", "correctOption"]
+    },
+    "Attempt": {
+      "title": "Attempt",
+      "description": "User attempt at a test",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "testId": { "type": "string" },
+        "score": { "type": "number" },
+        "rank": { "type": "integer" },
+        "answers": { "type": "object" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "testId", "startedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile documents"
+    },
+    "/courses/{courseId}": {
+      "schema": "Course",
+      "description": "Course catalog"
+    },
+    "/courses/{courseId}/lessons/{lessonId}": {
+      "schema": "Lesson",
+      "description": "Lessons within a course"
+    },
+    "/enrollments/{enrollmentId}": {
+      "schema": "Enrollment",
+      "description": "User course enrollments"
+    },
+    "/tests/{testId}": {
+      "schema": "Test",
+      "description": "Mock test definitions"
+    },
+    "/tests/{testId}/questions/{questionId}": {
+      "schema": "Question",
+      "description": "Questions for a test"
+    },
+    "/attempts/{attemptId}": {
+      "schema": "Attempt",
+      "description": "User test attempts"
+    }
+  }
+}
