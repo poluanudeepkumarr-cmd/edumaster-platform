@@ -231,6 +231,19 @@ const setRedisJson = async (key, value, options = {}) => {
   return setRedisValue(key, JSON.stringify(value), options);
 };
 
+const incrementRedisCounter = async (key, ttlSeconds) => {
+  if (!parseRedisTarget()) {
+    return null;
+  }
+
+  const count = await executeRedisCommand(['INCR', key]);
+  if (Number(count) === 1 && Number.isFinite(ttlSeconds) && ttlSeconds > 0) {
+    await executeRedisCommand(['EXPIRE', key, String(ttlSeconds)]);
+  }
+
+  return Number(count);
+};
+
 const checkRedisHealth = async () => {
   const target = parseRedisTarget();
   if (!target) {
@@ -289,4 +302,5 @@ module.exports = {
   deleteRedisKey,
   getRedisJson,
   setRedisJson,
+  incrementRedisCounter,
 };

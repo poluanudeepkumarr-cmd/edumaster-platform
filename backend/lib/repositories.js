@@ -3,6 +3,7 @@ const { randomUUID } = require('crypto');
 const User = require('../models/User.js');
 const Course = require('../models/Course.js');
 const Test = require('../models/Test.js');
+const { ApiError } = require('./http.js');
 const { getDatabaseMode } = require('./database.js');
 const { isPostgresReady, queryPostgres, runInTransaction } = require('./postgres.js');
 const {
@@ -71,21 +72,39 @@ const pushIfMissing = (collection, item, idField = '_id') => {
   }
 };
 
+const getModuleLessons = (module) => Array.isArray(module?.lessons) ? module.lessons : [];
+const getModuleChapters = (module) => Array.isArray(module?.chapters) ? module.chapters : [];
+const getChapterLessons = (chapter) => Array.isArray(chapter?.lessons) ? chapter.lessons : [];
+
 const lessonListFromCourse = (course) =>
-  (course.modules || []).flatMap((module) =>
-    (Array.isArray(module.lessons) ? module.lessons : []).map((lesson) => ({
+  (course.modules || []).flatMap((module) => ([
+    ...getModuleLessons(module).map((lesson) => ({
       ...clone(lesson),
       moduleId: module.id,
       moduleTitle: module.title,
+      chapterId: null,
+      chapterTitle: null,
       courseId: course._id,
     })),
-  );
+    ...getModuleChapters(module).flatMap((chapter) =>
+      getChapterLessons(chapter).map((lesson) => ({
+        ...clone(lesson),
+        moduleId: module.id,
+        moduleTitle: module.title,
+        chapterId: chapter.id,
+        chapterTitle: chapter.title,
+        courseId: course._id,
+      }))),
+  ]));
+
+const findLessonInCourse = (course, lessonId) =>
+  lessonListFromCourse(course).find((lesson) => lesson.id === String(lessonId)) || null;
 
 const redactCourseForViewer = (course, isEnrolled) => ({
   ...clone(course),
   modules: (course.modules || []).map((module) => ({
     ...clone(module),
-    lessons: (Array.isArray(module.lessons) ? module.lessons : []).map((lesson) => {
+    lessons: getModuleLessons(module).map((lesson) => {
       const isLocked = Boolean(lesson.premium) && !isEnrolled;
       return {
         ...clone(lesson),
@@ -94,6 +113,18 @@ const redactCourseForViewer = (course, isEnrolled) => ({
         locked: isLocked,
       };
     }),
+    chapters: getModuleChapters(module).map((chapter) => ({
+      ...clone(chapter),
+      lessons: getChapterLessons(chapter).map((lesson) => {
+        const isLocked = Boolean(lesson.premium) && !isEnrolled;
+        return {
+          ...clone(lesson),
+          videoUrl: isLocked ? null : lesson.videoUrl,
+          notesUrl: isLocked ? null : lesson.notesUrl,
+          locked: isLocked,
+        };
+      }),
+    })),
   })),
 });
 
@@ -124,7 +155,7 @@ const sortOldestFirst = (left, right, field) => new Date(left[field] || 0) - new
 const computeCourseProgress = (data, userId, course) => {
   const lessons = lessonListFromCourse(course);
   if (lessons.length === 0) {
-    return { progressPercent: 0, continueLesson: null, watchHistory: [] };
+    return { progressPercent: 0, continueLesson: null, continueProgressSeconds: 0, watchHistory: [] };
   }
 
   const history = data.watchHistory
@@ -143,6 +174,7 @@ const computeCourseProgress = (data, userId, course) => {
   return {
     progressPercent,
     continueLesson,
+    continueProgressSeconds: Number(continueItem?.progressSeconds || 0),
     watchHistory: clone(history),
   };
 };
@@ -3328,14 +3360,16 @@ const platformRepository = {
 
     const courseCards = courses.map((course) => {
       const isEnrolled = enrolledCourseIds.has(course._id);
-      const progress = userId ? computeCourseProgress(data, userId, course) : { progressPercent: 0, continueLesson: null };
+      const progress = userId ? computeCourseProgress(data, userId, course) : { progressPercent: 0, continueLesson: null, continueProgressSeconds: 0 };
       const visibleCourse = redactCourseForViewer(course, isEnrolled);
       return {
         ...visibleCourse,
         enrolled: isEnrolled,
         progressPercent: progress.progressPercent,
         continueLesson: progress.continueLesson,
+        continueProgressSeconds: progress.continueProgressSeconds,
         lessonCount: lessonListFromCourse(course).length,
+        lessonProgress: progress.watchHistory || [],
       };
     });
 
@@ -3406,9 +3440,19 @@ const platformRepository = {
   async enroll({ userId, courseId, source = 'payment', accessType = 'course' }) {
     await ensurePlatformSeeded();
 
+    const course = await coursesRepository.findById(courseId);
+    if (!course) {
+      throw new ApiError(404, 'Course not found', { code: 'COURSE_NOT_FOUND' });
+    }
+
+    const normalizedSource = String(source || 'payment');
+    if (Number(course.price || 0) > 0 && ['direct-access', 'free', 'self-serve'].includes(normalizedSource)) {
+      throw new ApiError(403, 'Paid course access requires a verified payment', { code: 'PAYMENT_REQUIRED' });
+    }
+
     if (isPostgresMode()) {
       return runInTransaction(async (client) => {
-        const enrollment = await insertPgEnrollment({ userId, courseId, source, accessType }, client);
+        const enrollment = await insertPgEnrollment({ userId, courseId, source: normalizedSource, accessType }, client);
         const user = await pgOne('SELECT * FROM users WHERE id = $1', [String(userId)], mapUserRow, client);
         if (user) {
           await insertPgDeviceActivity({
@@ -3418,7 +3462,7 @@ const platformRepository = {
             eventType: 'course_enrolled',
             meta: {
               courseId: String(courseId),
-              source,
+              source: normalizedSource,
               accessType,
             },
           }, client);
@@ -3440,7 +3484,7 @@ const platformRepository = {
       userId: String(userId),
       courseId: String(courseId),
       accessType,
-      source,
+      source: normalizedSource,
       enrolledAt: nowIso(),
       expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
     };
@@ -3456,7 +3500,7 @@ const platformRepository = {
         eventType: 'course_enrolled',
         meta: {
           courseId: String(courseId),
-          source,
+          source: normalizedSource,
           accessType,
         },
         createdAt: nowIso(),
@@ -3574,6 +3618,36 @@ const platformRepository = {
 
   async updateWatchProgress({ userId, courseId, lessonId, progressPercent, progressSeconds, completed }) {
     await ensurePlatformSeeded();
+
+    const course = await coursesRepository.findById(courseId);
+    if (!course) {
+      throw new ApiError(404, 'Course not found', { code: 'COURSE_NOT_FOUND' });
+    }
+
+    const lesson = findLessonInCourse(course, lessonId);
+    if (!lesson) {
+      throw new ApiError(404, 'Lesson not found in this course', { code: 'LESSON_NOT_FOUND' });
+    }
+
+    let hasAccess = Number(course.price || 0) === 0;
+    if (!hasAccess) {
+      if (isPostgresMode()) {
+        const enrollment = await pgOne(
+          'SELECT id FROM enrollments WHERE user_id = $1 AND course_id = $2',
+          [String(userId), String(courseId)],
+          (entry) => entry,
+        );
+        hasAccess = Boolean(enrollment);
+      } else {
+        hasAccess = state.enrollments.some(
+          (entry) => entry.userId === String(userId) && entry.courseId === String(courseId),
+        );
+      }
+    }
+
+    if (!hasAccess) {
+      throw new ApiError(403, 'Enroll in the course before saving progress', { code: 'COURSE_ACCESS_REQUIRED' });
+    }
 
     if (isPostgresMode()) {
       return runInTransaction(async (client) => {

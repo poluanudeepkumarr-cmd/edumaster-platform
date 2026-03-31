@@ -2,6 +2,10 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { EduService } from './EduService';
 import { AuthUser, RegisterPayload } from './types';
 
+type WindowWithProgressFlush = Window & {
+  __edumasterFlushProgress?: () => Promise<void>;
+};
+
 interface AuthContextType {
   user: AuthUser | null;
   loading: boolean;
@@ -46,6 +50,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const logout = async () => {
+    if (typeof window !== 'undefined') {
+      try {
+        await (window as WindowWithProgressFlush).__edumasterFlushProgress?.();
+      } catch (error) {
+        console.error('Failed to flush lesson progress before logout:', error);
+      }
+    }
+
     await EduService.logout();
     setUser(null);
   };

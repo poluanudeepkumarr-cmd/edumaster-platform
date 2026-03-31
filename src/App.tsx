@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowRight,
   BellRing,
@@ -40,13 +40,13 @@ import {
   YAxis,
 } from 'recharts';
 import { AuthProvider, useAuth } from './AuthContext';
+import { CoursesTab } from './components/CoursesTab';
 import { EduService } from './EduService';
+import { AdminCourseManager } from './components/AdminCourseManager';
 import { AdminModuleManager } from './components/AdminModuleManager';
 import { AdminVideoUpload } from './components/AdminVideoUpload';
 import {
   AiResponse,
-  CourseCard,
-  CourseLesson,
   DailyQuizResult,
   LiveChatMessage,
   MockTest,
@@ -85,22 +85,17 @@ const formatTimeLeft = (seconds: number) => {
   return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
 };
 
-const getYouTubeEmbedUrl = (value?: string) => {
-  if (!value) {
-    return null;
+const formatPlaybackTime = (seconds: number) => {
+  const safeSeconds = Math.max(Math.floor(seconds || 0), 0);
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const remainingSeconds = safeSeconds % 60;
+
+  if (hours > 0) {
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
   }
 
-  if (value.includes('/embed/')) {
-    return value;
-  }
-
-  try {
-    const url = new URL(value);
-    const videoId = url.searchParams.get('v') || url.pathname.split('/').filter(Boolean).pop();
-    return videoId ? `https://www.youtube.com/embed/${videoId}` : value;
-  } catch {
-    return value;
-  }
+  return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
 };
 
 const formatEventLabel = (eventType: string) =>
@@ -376,12 +371,18 @@ const Shell = ({
   setActiveTab,
   onLogout,
   onRefresh,
+  resumeTarget,
+  onContinueLearningNavigate,
+  onResumeNavigationHandled,
 }: {
   overview: PlatformOverview;
   activeTab: TabKey;
   setActiveTab: (tab: TabKey) => void;
   onLogout: () => Promise<void>;
   onRefresh: () => Promise<void>;
+  resumeTarget: { courseId: string; lessonId?: string | null } | null;
+  onContinueLearningNavigate: (courseId: string, lessonId?: string | null) => void;
+  onResumeNavigationHandled: () => void;
 }) => {
   const { user, isAdmin } = useAuth();
 
@@ -464,8 +465,24 @@ const Shell = ({
         </header>
 
         <main className="mx-auto flex w-full max-w-7xl flex-1 flex-col px-4 pb-28 pt-6 sm:px-6 lg:px-8">
-          {activeTab === 'overview' && <OverviewTab overview={overview} />}
-          {activeTab === 'courses' && <CoursesTab overview={overview} onRefresh={onRefresh} />}
+          {activeTab === 'overview' && (
+            <OverviewTab
+              overview={overview}
+              onContinueLearning={(courseId, lessonId) => {
+                onContinueLearningNavigate(courseId, lessonId);
+                setActiveTab('courses');
+              }}
+            />
+          )}
+          {activeTab === 'courses' && (
+            <CoursesTab
+              overview={overview}
+              onRefresh={onRefresh}
+              initialCourseId={resumeTarget?.courseId}
+              initialLessonId={resumeTarget?.lessonId || null}
+              onResumeNavigationHandled={onResumeNavigationHandled}
+            />
+          )}
           {activeTab === 'tests' && <TestsTab overview={overview} onRefresh={onRefresh} />}
           {activeTab === 'quiz' && <QuizTab overview={overview} onRefresh={onRefresh} />}
           {activeTab === 'live' && <LiveTab overview={overview} />}
@@ -496,7 +513,13 @@ const Shell = ({
   );
 };
 
-const OverviewTab = ({ overview }: { overview: PlatformOverview }) => (
+const OverviewTab = ({
+  overview,
+  onContinueLearning,
+}: {
+  overview: PlatformOverview;
+  onContinueLearning: (courseId: string, lessonId?: string | null) => void;
+}) => (
   <div className="space-y-6">
     <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
       <div className="rounded-[34px] bg-[var(--card-dark)] p-6 text-white shadow-[0_30px_120px_rgba(15,23,42,0.3)] sm:p-8">
@@ -540,7 +563,11 @@ const OverviewTab = ({ overview }: { overview: PlatformOverview }) => (
         <SectionHeader title="Continue learning" caption="Resume playback" />
         <div className="mt-6 space-y-4">
           {overview.dashboard.continueLearning.length > 0 ? overview.dashboard.continueLearning.map((course) => (
-            <div key={course._id} className="rounded-[26px] border border-[var(--line)] p-4">
+            <button
+              key={course._id}
+              onClick={() => onContinueLearning(course._id, course.continueLesson?.id || null)}
+              className="w-full rounded-[26px] border border-[var(--line)] p-4 text-left transition hover:border-[var(--accent-rust)]"
+            >
               <div className="flex items-start gap-4">
                 <img src={course.thumbnailUrl} alt={course.title} className="h-24 w-24 rounded-[20px] object-cover" />
                 <div className="min-w-0 flex-1">
@@ -548,6 +575,9 @@ const OverviewTab = ({ overview }: { overview: PlatformOverview }) => (
                   <h3 className="mt-2 text-lg font-semibold text-[var(--ink)]">{course.title}</h3>
                   <p className="mt-1 text-sm text-[var(--ink-soft)]">
                     Resume: {course.continueLesson?.title || 'Start your next lesson'}
+                    {course.continueProgressSeconds
+                      ? ` at ${formatPlaybackTime(course.continueProgressSeconds)}`
+                      : ''}
                   </p>
                   <div className="mt-4">
                     <div className="mb-2 flex items-center justify-between text-xs text-[var(--ink-soft)]">
@@ -560,7 +590,7 @@ const OverviewTab = ({ overview }: { overview: PlatformOverview }) => (
                   </div>
                 </div>
               </div>
-            </div>
+            </button>
           )) : (
             <div className="rounded-[26px] border border-dashed border-[var(--line)] p-6 text-sm text-[var(--ink-soft)]">
               No watch history yet. Unlock a course or replay a live class to build learning continuity.
@@ -628,409 +658,6 @@ const OverviewTab = ({ overview }: { overview: PlatformOverview }) => (
     </section>
   </div>
 );
-
-const CoursesTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRefresh: () => Promise<void> }) => {
-  const { user } = useAuth();
-  const [selectedCourseId, setSelectedCourseId] = useState<string | null>(overview.courses[0]?._id || null);
-  const [selectedLessonId, setSelectedLessonId] = useState<string | null>(null);
-  const [playbackSpeed, setPlaybackSpeed] = useState(1);
-  const [busyCourseId, setBusyCourseId] = useState<string | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const selectedCourse = useMemo(
-    () => overview.courses.find((course) => course._id === selectedCourseId) || overview.courses[0] || null,
-    [overview.courses, selectedCourseId],
-  );
-  const selectedLessonMeta = useMemo(() => {
-    if (!selectedCourse) {
-      return null;
-    }
-
-    const lessons = selectedCourse.modules.flatMap((module) =>
-      module.lessons.map((lesson) => ({
-        lesson,
-        moduleTitle: module.title,
-      })),
-    );
-
-    return lessons.find((entry) => entry.lesson.id === selectedLessonId)
-      || lessons.find((entry) => entry.lesson.id === selectedCourse.continueLesson?.id)
-      || lessons[0]
-      || null;
-  }, [selectedCourse, selectedLessonId]);
-
-  useEffect(() => {
-    if (!selectedCourseId && overview.courses[0]) {
-      setSelectedCourseId(overview.courses[0]._id);
-    }
-  }, [overview.courses, selectedCourseId]);
-
-  useEffect(() => {
-    if (!selectedCourse) {
-      return;
-    }
-
-    const lessonIds = selectedCourse.modules.flatMap((module) => module.lessons.map((lesson) => lesson.id));
-    if (selectedLessonId && lessonIds.includes(selectedLessonId)) {
-      return;
-    }
-
-    setSelectedLessonId(selectedCourse.continueLesson?.id || lessonIds[0] || null);
-  }, [selectedCourse, selectedLessonId]);
-
-  const handleUnlock = async (course: CourseCard) => {
-    if (!user) {
-      return;
-    }
-
-    setBusyCourseId(course._id);
-    try {
-      const checkout = await EduService.unlockCourse(course);
-      const popup = window.open(
-        checkout.url,
-        'edumaster-stripe-checkout',
-        'popup=yes,width=520,height=760',
-      );
-
-      if (!popup) {
-        throw new Error('Stripe popup was blocked. Please allow popups and try again.');
-      }
-
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        const timeoutId = window.setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          window.removeEventListener('message', handleMessage);
-          reject(new Error('Payment confirmation timed out. If payment succeeded, refresh and try again.'));
-        }, 5 * 60 * 1000);
-
-        const closeWatcher = window.setInterval(() => {
-          if (popup.closed && !settled) {
-            settled = true;
-            window.clearTimeout(timeoutId);
-            window.clearInterval(closeWatcher);
-            window.removeEventListener('message', handleMessage);
-            reject(new Error('Payment window was closed before confirmation.'));
-          }
-        }, 500);
-
-        const handleMessage = async (event: MessageEvent) => {
-          if (event.origin !== window.location.origin) {
-            return;
-          }
-
-          const data = event.data || {};
-          if (data.type !== 'STRIPE_PAYMENT_SUCCESS' || data.courseId !== course._id || !data.sessionId) {
-            return;
-          }
-
-          try {
-            await EduService.confirmCoursePayment(data.sessionId, course._id);
-            if (!popup.closed) {
-              popup.close();
-            }
-            if (!settled) {
-              settled = true;
-              window.clearTimeout(timeoutId);
-              window.clearInterval(closeWatcher);
-              window.removeEventListener('message', handleMessage);
-              resolve();
-            }
-          } catch (error) {
-            if (!settled) {
-              settled = true;
-              window.clearTimeout(timeoutId);
-              window.clearInterval(closeWatcher);
-              window.removeEventListener('message', handleMessage);
-              reject(error instanceof Error ? error : new Error('Payment confirmation failed.'));
-            }
-          }
-        };
-
-        window.addEventListener('message', handleMessage);
-      });
-
-      await onRefresh();
-    } finally {
-      setBusyCourseId(null);
-    }
-  };
-
-  const markLessonComplete = async (courseId: string, lesson: CourseLesson) => {
-    if (!user) {
-      return;
-    }
-
-    setBusyCourseId(courseId);
-    try {
-      await EduService.updateWatchProgress(
-        courseId,
-        lesson.id,
-        100,
-        lesson.durationMinutes * 60,
-        true,
-      );
-      await onRefresh();
-    } finally {
-      setBusyCourseId(null);
-    }
-  };
-
-  const selectedLesson = selectedLessonMeta?.lesson || null;
-  const canAccessLesson = Boolean(selectedCourse?.enrolled || (!selectedLesson?.premium && !selectedLesson?.locked));
-  const embedUrl = selectedLesson?.type === 'youtube' ? getYouTubeEmbedUrl(selectedLesson.videoUrl) : null;
-  const hostedVideoUrl = selectedLesson?.type === 'video' ? selectedLesson.videoUrl || null : null;
-
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.playbackRate = playbackSpeed;
-    }
-  }, [playbackSpeed, hostedVideoUrl]);
-
-  return (
-    <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-      <section className="rounded-[30px] border border-white/70 bg-white/92 p-6 shadow-[0_22px_70px_rgba(15,23,42,0.07)]">
-        <SectionHeader title="Course catalog" caption="Category → Course → Subject → Lessons" />
-        <div className="mt-6 space-y-4">
-          {overview.courses.map((course) => (
-            <button
-              key={course._id}
-              onClick={() => setSelectedCourseId(course._id)}
-              className={cn(
-                'w-full rounded-[26px] border p-4 text-left transition',
-                selectedCourse?._id === course._id
-                  ? 'border-[var(--accent-rust)] bg-[var(--accent-cream)]'
-                  : 'border-[var(--line)] bg-white hover:border-[var(--accent-rust)]/35',
-              )}
-            >
-              <div className="flex gap-4">
-                <img src={course.thumbnailUrl} alt={course.title} className="h-24 w-24 rounded-[18px] object-cover" />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[var(--ink-soft)]">{course.category}</p>
-                    <span className={cn(
-                      'rounded-full px-3 py-1 text-xs font-semibold',
-                      course.enrolled ? 'bg-[var(--success-soft)] text-[var(--success)]' : 'bg-[var(--accent-cream)] text-[var(--accent-rust)]',
-                    )}>
-                      {course.enrolled ? 'Unlocked' : 'Premium'}
-                    </span>
-                  </div>
-                  <h3 className="mt-2 text-lg font-semibold text-[var(--ink)]">{course.title}</h3>
-                  <p className="mt-2 text-sm leading-6 text-[var(--ink-soft)]">{course.description}</p>
-                  <div className="mt-4 flex items-center justify-between text-sm">
-                    <span className="text-[var(--ink-soft)]">{course.lessonCount} lessons • {course.progressPercent || 0}% done</span>
-                    <span className="font-semibold text-[var(--ink)]">{currency.format(course.price)}</span>
-                  </div>
-                </div>
-              </div>
-            </button>
-          ))}
-        </div>
-      </section>
-
-      <section className="rounded-[30px] border border-white/70 bg-white/92 p-6 shadow-[0_22px_70px_rgba(15,23,42,0.07)]">
-        {selectedCourse ? (
-          <>
-            <div className="flex flex-col gap-6 lg:flex-row">
-              <img src={selectedCourse.thumbnailUrl} alt={selectedCourse.title} className="h-52 w-full rounded-[28px] object-cover lg:w-72" />
-              <div className="flex-1">
-                <p className="text-xs font-semibold uppercase tracking-[0.28em] text-[var(--ink-soft)]">{selectedCourse.exam}</p>
-                <h2 className="mt-3 text-3xl font-semibold text-[var(--ink)]">{selectedCourse.title}</h2>
-                <p className="mt-4 max-w-2xl text-sm leading-7 text-[var(--ink-soft)]">{selectedCourse.description}</p>
-                <div className="mt-5 flex flex-wrap gap-3 text-sm">
-                  <span className="rounded-full bg-[var(--accent-cream)] px-4 py-2 text-[var(--ink)]">{selectedCourse.subject}</span>
-                  <span className="rounded-full bg-[var(--accent-cream)] px-4 py-2 text-[var(--ink)]">{selectedCourse.level}</span>
-                  <span className="rounded-full bg-[var(--accent-cream)] px-4 py-2 text-[var(--ink)]">{selectedCourse.validityDays} day access</span>
-                </div>
-                <div className="mt-6 flex flex-wrap items-center gap-3">
-                  {selectedCourse.enrolled ? (
-                    <span className="rounded-full bg-[var(--success-soft)] px-4 py-3 text-sm font-semibold text-[var(--success)]">
-                      Access active
-                    </span>
-                  ) : (
-                    <button
-                      onClick={() => handleUnlock(selectedCourse)}
-                      disabled={busyCourseId === selectedCourse._id}
-                      className="flex items-center gap-2 rounded-2xl bg-[var(--accent-rust)] px-5 py-3 font-semibold text-white transition hover:bg-[var(--accent-rust-strong)] disabled:opacity-60"
-                    >
-                      {busyCourseId === selectedCourse._id ? <LoaderCircle className="h-5 w-5 animate-spin" /> : <Wallet className="h-5 w-5" />}
-                      Simulate payment + unlock
-                    </button>
-                  )}
-                  {selectedCourse.officialChannelUrl && (
-                    <a
-                      href={selectedCourse.officialChannelUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="rounded-full border border-[var(--line)] px-4 py-3 text-sm font-medium text-[var(--ink)] transition hover:border-[var(--accent-rust)]"
-                    >
-                      Official channel
-                    </a>
-                  )}
-                  <p className="text-sm text-[var(--ink-soft)]">Includes YouTube lessons, premium videos, PDF notes, resume playback, and locked access until purchase.</p>
-                </div>
-              </div>
-            </div>
-
-            {selectedLesson && (
-              <div className="mt-8 rounded-[28px] bg-[var(--card-dark)] p-5 text-white sm:p-6">
-                <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-[0.24em] text-white/55">{selectedLessonMeta?.moduleTitle}</p>
-                    <h3 className="mt-2 text-2xl font-semibold">{selectedLesson.title}</h3>
-                    <p className="mt-3 text-sm leading-7 text-white/70">
-                      {selectedLesson.durationMinutes} min • {selectedLesson.type} • {canAccessLesson ? 'Resume-ready playback' : 'Purchase required to unlock this premium lesson'}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-3">
-                    <label className="rounded-full border border-white/15 bg-white/8 px-4 py-2 text-sm text-white/80">
-                      <span className="mr-2">Speed</span>
-                      <select
-                        value={playbackSpeed}
-                        onChange={(event) => setPlaybackSpeed(Number(event.target.value))}
-                        className="bg-transparent outline-none"
-                      >
-                        {[0.75, 1, 1.25, 1.5, 2].map((speed) => (
-                          <option key={speed} value={speed} className="text-[var(--ink)]">
-                            {speed}x
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    {selectedLesson.notesUrl && canAccessLesson && (
-                      <a
-                        href={selectedLesson.notesUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="rounded-full border border-white/15 bg-white/8 px-4 py-2 text-sm text-white/80"
-                      >
-                        Open notes PDF
-                      </a>
-                    )}
-                    <button
-                      onClick={() => void markLessonComplete(selectedCourse._id, selectedLesson)}
-                      disabled={!canAccessLesson || busyCourseId === selectedCourse._id}
-                      className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-[var(--ink)] disabled:opacity-55"
-                    >
-                      Mark complete
-                    </button>
-                  </div>
-                </div>
-
-                <div className="mt-5 overflow-hidden rounded-[24px] border border-white/10 bg-black/25">
-                  {canAccessLesson && embedUrl ? (
-                    <iframe
-                      src={embedUrl}
-                      title={selectedLesson.title}
-                      className="aspect-video w-full"
-                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                      allowFullScreen
-                    />
-                  ) : canAccessLesson && hostedVideoUrl ? (
-                    <video
-                      key={hostedVideoUrl}
-                      ref={videoRef}
-                      src={hostedVideoUrl}
-                      controls
-                      controlsList="nodownload"
-                      playsInline
-                      preload="metadata"
-                      className="aspect-video w-full bg-black"
-                    />
-                  ) : canAccessLesson ? (
-                    <div className="flex aspect-video flex-col justify-between p-6">
-                      <div>
-                        <p className="text-sm font-semibold text-white">Platform-hosted playback</p>
-                        <p className="mt-3 max-w-2xl text-sm leading-7 text-white/68">
-                          Premium streams are wired for resume playback and speed control. This demo uses protected placeholder media URLs, so the card stands in for the secured player state.
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap gap-3 text-sm text-white/72">
-                        <span className="rounded-full border border-white/12 px-3 py-2">Resume supported</span>
-                        <span className="rounded-full border border-white/12 px-3 py-2">Playback speed: {playbackSpeed}x</span>
-                        <span className="rounded-full border border-white/12 px-3 py-2">{selectedCourse.progressPercent || 0}% course progress</span>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex aspect-video flex-col items-center justify-center gap-4 px-6 text-center">
-                      <Lock className="h-10 w-10 text-[var(--accent-rust)]" />
-                      <div>
-                        <p className="text-lg font-semibold">Premium lesson locked</p>
-                        <p className="mt-2 text-sm leading-7 text-white/68">
-                          Enroll in this course to unlock protected video playback, notes, and tracked progress for this lesson.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {selectedCourse.continueLesson && (
-                  <div className="mt-5 rounded-[22px] bg-white/8 p-4 text-sm text-white/80">
-                    Continue watching is available on <span className="font-semibold text-white">{selectedCourse.continueLesson.title}</span> with backend-synced history and progress percentage.
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="mt-8 space-y-5">
-              {selectedCourse.modules.map((module) => (
-                <div key={module.id} className="rounded-[26px] border border-[var(--line)] p-5">
-                  <p className="text-sm font-semibold text-[var(--ink)]">{module.title}</p>
-                  <div className="mt-4 space-y-3">
-                    {module.lessons.map((lesson) => (
-                      <div key={lesson.id} className="flex flex-col gap-3 rounded-[22px] bg-[var(--accent-cream)] p-4 sm:flex-row sm:items-center sm:justify-between">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            {lesson.type === 'youtube' ? (
-                              <PlayCircle className="h-4 w-4 text-[var(--accent-rust)]" />
-                            ) : lesson.premium ? (
-                              <Lock className="h-4 w-4 text-[var(--accent-rust)]" />
-                            ) : (
-                              <BookOpen className="h-4 w-4 text-[var(--accent-rust)]" />
-                            )}
-                            <p className="font-medium text-[var(--ink)]">{lesson.title}</p>
-                            {lesson.locked && <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[var(--accent-rust)]">Locked</span>}
-                          </div>
-                          <p className="mt-1 text-sm text-[var(--ink-soft)]">
-                            {lesson.durationMinutes} min • {lesson.type} • {lesson.notesUrl ? 'PDF notes attached' : 'Video only'}
-                          </p>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={() => setSelectedLessonId(lesson.id)}
-                            className={cn(
-                              'rounded-full border px-4 py-2 text-sm font-medium transition',
-                              selectedLesson?.id === lesson.id
-                                ? 'border-[var(--accent-rust)] bg-white text-[var(--accent-rust)]'
-                                : 'border-[var(--line)] bg-white text-[var(--ink)] hover:border-[var(--accent-rust)]',
-                            )}
-                          >
-                            {lesson.locked ? 'Preview' : 'Watch'}
-                          </button>
-                          <button
-                            onClick={() => void markLessonComplete(selectedCourse._id, lesson)}
-                            disabled={Boolean(lesson.locked) || busyCourseId === selectedCourse._id}
-                            className="rounded-full border border-[var(--line)] bg-white px-4 py-2 text-sm font-medium text-[var(--ink)] transition hover:border-[var(--accent-rust)] disabled:opacity-60"
-                          >
-                            {selectedCourse.enrolled ? 'Track progress' : 'Unlock to track'}
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </>
-        ) : (
-          <div className="rounded-[24px] border border-dashed border-[var(--line)] p-8 text-[var(--ink-soft)]">
-            Select a course to view modules, lessons, and access rules.
-          </div>
-        )}
-      </section>
-    </div>
-  );
-};
 
 const TestPlayer = ({
   test,
@@ -1778,6 +1405,10 @@ const AnalyticsTab = ({ overview }: { overview: PlatformOverview }) => {
 const PlansTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRefresh: () => Promise<void> }) => {
   const { user } = useAuth();
   const [busyPlanId, setBusyPlanId] = useState<string | null>(null);
+  const [paymentMessage, setPaymentMessage] = useState<{ type: 'success' | 'error' | null; text: string }>({
+    type: null,
+    text: '',
+  });
 
   const activatePlan = async (plan: (typeof overview.subscriptions)[number]) => {
     if (!user || plan.active) {
@@ -1786,8 +1417,85 @@ const PlansTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRefre
 
     setBusyPlanId(plan._id);
     try {
-      await EduService.unlockSubscription(plan);
+      setPaymentMessage({ type: null, text: '' });
+      const checkout = await EduService.unlockSubscription(plan);
+      const popup = window.open(
+        checkout.url,
+        'edumaster-stripe-subscription',
+        'popup=yes,width=520,height=760',
+      );
+
+      if (!popup) {
+        throw new Error('Stripe popup was blocked. Please allow popups and try again.');
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const timeoutId = window.setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          window.removeEventListener('message', handleMessage);
+          reject(new Error('Subscription confirmation timed out. If payment succeeded, refresh and try again.'));
+        }, 5 * 60 * 1000);
+
+        const closeWatcher = window.setInterval(() => {
+          if (popup.closed && !settled) {
+            settled = true;
+            window.clearTimeout(timeoutId);
+            window.clearInterval(closeWatcher);
+            window.removeEventListener('message', handleMessage);
+            reject(new Error('Payment window was closed before confirmation.'));
+          }
+        }, 500);
+
+        const handleMessage = async (event: MessageEvent) => {
+          if (event.origin !== window.location.origin) {
+            return;
+          }
+
+          const data = event.data || {};
+          if (
+            data.type !== 'STRIPE_PAYMENT_SUCCESS'
+            || data.accessType !== 'subscription'
+            || data.planId !== plan._id
+            || !data.sessionId
+          ) {
+            return;
+          }
+
+          try {
+            await EduService.confirmSubscriptionPayment(data.sessionId, plan._id);
+            if (!popup.closed) {
+              popup.close();
+            }
+            if (!settled) {
+              settled = true;
+              window.clearTimeout(timeoutId);
+              window.clearInterval(closeWatcher);
+              window.removeEventListener('message', handleMessage);
+              resolve();
+            }
+          } catch (error) {
+            if (!settled) {
+              settled = true;
+              window.clearTimeout(timeoutId);
+              window.clearInterval(closeWatcher);
+              window.removeEventListener('message', handleMessage);
+              reject(error instanceof Error ? error : new Error('Subscription confirmation failed.'));
+            }
+          }
+        };
+
+        window.addEventListener('message', handleMessage);
+      });
+
+      setPaymentMessage({ type: 'success', text: `${plan.title} is now active on your account.` });
       await onRefresh();
+    } catch (error) {
+      setPaymentMessage({
+        type: 'error',
+        text: error instanceof Error ? error.message : 'Unable to activate subscription right now.',
+      });
     } finally {
       setBusyPlanId(null);
     }
@@ -1833,14 +1541,19 @@ const PlansTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRefre
                   Activate plan
                 </button>
               )}
-              <p className="text-sm text-[var(--ink-soft)]">Instant access is granted after the simulated payment + subscription activation flow.</p>
+              <p className="text-sm text-[var(--ink-soft)]">Access is activated after the subscription payment and backend confirmation flow.</p>
             </div>
             <div className="mt-6 rounded-[24px] bg-[var(--accent-cream)] p-4 text-sm text-[var(--ink-soft)]">
-              Payment retries, failure handling, and instant access handoff are modeled in the backend payment, webhook, and subscription activation flow.
+              Payment retries, failure handling, and activation handoff are modeled in the backend payment, webhook, and subscription flow.
             </div>
           </div>
         ))}
       </div>
+      {paymentMessage.type && (
+        <div className={`rounded-[24px] p-4 text-sm ${paymentMessage.type === 'success' ? 'bg-[var(--success-soft)] text-[var(--success)]' : 'bg-red-50 text-red-600'}`}>
+          {paymentMessage.text}
+        </div>
+      )}
     </div>
   );
 };
@@ -2054,6 +1767,7 @@ const AdminTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRefre
         </section>
       </div>
 
+      <AdminCourseManager courses={overview.courses || []} onCoursesChanged={onRefresh} />
       <AdminVideoUpload courses={overview.courses || []} onVideoUploaded={onRefresh} />
       <AdminModuleManager courses={overview.courses || []} onModulesChanged={onRefresh} />
 
@@ -2118,6 +1832,7 @@ const AppContent = () => {
   const [overview, setOverview] = useState<PlatformOverview | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
   const [loadingOverview, setLoadingOverview] = useState(true);
+  const [resumeTarget, setResumeTarget] = useState<{ courseId: string; lessonId?: string | null } | null>(null);
 
   const refreshOverview = async (background = true) => {
     if (!background) {
@@ -2160,7 +1875,18 @@ const AppContent = () => {
     return <AuthScreen publicOverview={publicOverview} />;
   }
 
-  return <Shell overview={overview} activeTab={activeTab} setActiveTab={setActiveTab} onLogout={logout} onRefresh={() => refreshOverview(true)} />;
+  return (
+    <Shell
+      overview={overview}
+      activeTab={activeTab}
+      setActiveTab={setActiveTab}
+      onLogout={logout}
+      onRefresh={() => refreshOverview(true)}
+      resumeTarget={resumeTarget}
+      onContinueLearningNavigate={(courseId, lessonId) => setResumeTarget({ courseId, lessonId })}
+      onResumeNavigationHandled={() => setResumeTarget(null)}
+    />
+  );
 };
 
 export default function App() {

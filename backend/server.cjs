@@ -8,6 +8,7 @@ dotenv.config({ path: path.join(__dirname, '.env') });
 const { appConfig } = require('./lib/config.js');
 const { getHealthSnapshot } = require('./lib/health.js');
 const { securityHeaders, basicRateLimit } = require('./middleware/security.js');
+const { notFoundHandler, errorHandler } = require('./middleware/error-handler.js');
 const paymentRoutes = require('./payment/payment.routes.js');
 const engagementRoutes = require('./engagement/engagement.routes.js');
 const notificationsRoutes = require('./notifications/notifications.routes.js');
@@ -71,9 +72,8 @@ app.use('/api/platform', platformRoutes);
 const PORT = appConfig.port;
 const HOST = process.env.HOST || '127.0.0.1';
 
-app.use((req, res) => {
-  res.status(404).json({ message: 'Route not found' });
-});
+app.use(notFoundHandler);
+app.use(errorHandler);
 
 const startServer = async (options = {}) => {
   const databaseState = await connectDatabase();

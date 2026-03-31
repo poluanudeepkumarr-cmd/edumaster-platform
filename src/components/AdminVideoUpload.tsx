@@ -15,6 +15,11 @@ interface Video {
 interface Module {
   id: string;
   title: string;
+  chapters?: Array<{
+    id: string;
+    title: string;
+    lessons: Video[];
+  }>;
   lessons: Video[];
 }
 
@@ -51,6 +56,7 @@ const formatDate = (dateString: string): string => {
 export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onVideoUploaded }) => {
   const [selectedCourse, setSelectedCourse] = useState<string>(courses[0]?._id || '');
   const [selectedModule, setSelectedModule] = useState<string>('');
+  const [selectedChapter, setSelectedChapter] = useState<string>('');
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [lessonTitle, setLessonTitle] = useState('');
   const [durationMinutes, setDurationMinutes] = useState(0);
@@ -66,6 +72,7 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
 
   const currentCourse = courses.find((c) => c._id === selectedCourse);
   const currentModule = currentCourse?.modules?.find((m) => m.id === selectedModule);
+  const currentChapter = currentModule?.chapters?.find((chapter) => chapter.id === selectedChapter);
 
   const handleVideoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -98,25 +105,26 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
     if (!videoFile || !selectedCourse || !selectedModule || !lessonTitle) {
       setUploadStatus({
         type: 'error',
-        message: 'Please select course, module, video file, and enter lesson title',
+        message: 'Please select course, subject, topic file, and enter a topic title',
       });
       return;
     }
 
     setUploading(true);
     try {
-      const result = await EduService.uploadVideoToModule(
+      await EduService.uploadVideoToModule(
         selectedCourse,
         selectedModule,
         videoFile,
         lessonTitle,
         durationMinutes,
         isPremium,
+        selectedChapter || undefined,
       );
 
       setUploadStatus({
         type: 'success',
-        message: `Video "${lessonTitle}" uploaded successfully!`,
+        message: `Topic "${lessonTitle}" uploaded successfully!`,
       });
 
       // Reset form
@@ -152,22 +160,29 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
         if (Array.isArray(response)) {
           setVideos(response);
         } else if (response && typeof response === 'object' && 'videos' in response) {
-          setVideos((response as any).videos || []);
+          const moduleResponse = response as any;
+          const moduleDetails = moduleResponse.module || {};
+          if (selectedChapter) {
+            const matchedChapter = (moduleDetails.chapters || []).find((chapter: any) => chapter.id === selectedChapter);
+            setVideos(matchedChapter?.lessons || []);
+          } else {
+            setVideos(moduleResponse.videos || []);
+          }
         } else {
           setVideos([]);
         }
       } catch (err) {
-        console.error('Failed to load videos:', err);
+        console.error('Failed to load topics:', err);
       }
     }
   };
 
   React.useEffect(() => {
     loadModuleVideos();
-  }, [selectedCourse, selectedModule]);
+  }, [selectedCourse, selectedModule, selectedChapter]);
 
   const handleDeleteVideo = async (videoId: string) => {
-    if (!confirm('Are you sure you want to delete this video?')) {
+    if (!confirm('Are you sure you want to delete this topic?')) {
       return;
     }
 
@@ -176,7 +191,7 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
       await EduService.deleteVideoFromModule(selectedCourse, selectedModule, videoId);
       setUploadStatus({
         type: 'success',
-        message: 'Video deleted successfully',
+        message: 'Topic deleted successfully',
       });
       await loadModuleVideos();
     } catch (err) {
@@ -194,12 +209,11 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
       <div>
         <h3 className="text-2xl font-semibold text-[var(--ink)]">Video Upload Manager</h3>
         <p className="mt-1 text-sm text-[var(--ink-soft)]">
-          Upload videos to specific course modules. Videos are organized by course section.
+          Upload topic videos inside a course subject and optional chapter so students see the same learning structure.
         </p>
       </div>
 
-      {/* Course & Module Selection */}
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-4 md:grid-cols-3">
         <div>
           <label className="block text-sm font-semibold text-[var(--ink)] mb-2">Select Course</label>
           <select
@@ -207,6 +221,7 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
             onChange={(e) => {
               setSelectedCourse(e.target.value);
               setSelectedModule('');
+              setSelectedChapter('');
               setVideos([]);
             }}
             className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3 text-[var(--ink)] outline-none focus:border-[var(--accent-rust)]"
@@ -221,17 +236,18 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
         </div>
 
         <div>
-          <label className="block text-sm font-semibold text-[var(--ink)] mb-2">Select Module</label>
+          <label className="block text-sm font-semibold text-[var(--ink)] mb-2">Select Subject</label>
           <select
             value={selectedModule}
             onChange={(e) => {
               setSelectedModule(e.target.value);
+              setSelectedChapter('');
               setVideos([]);
             }}
             disabled={!selectedCourse}
             className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3 text-[var(--ink)] outline-none disabled:opacity-50 focus:border-[var(--accent-rust)]"
           >
-            <option value="">-- Choose a module --</option>
+            <option value="">-- Choose a subject --</option>
             {currentCourse?.modules?.map((module) => (
               <option key={module.id} value={module.id}>
                 {module.title}
@@ -239,14 +255,38 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
             ))}
           </select>
         </div>
-      </div>
-
-      {/* Video Upload Form */}
-      <div className="space-y-4 rounded-[24px] border-2 border-dashed border-[var(--line)] bg-[var(--accent-cream)] p-6">
-        <h4 className="font-semibold text-[var(--ink)]">Upload Video</h4>
 
         <div>
-          <label className="block text-sm font-semibold text-[var(--ink)] mb-2">Video File</label>
+          <label className="block text-sm font-semibold text-[var(--ink)] mb-2">Select Chapter</label>
+          <select
+            value={selectedChapter}
+            onChange={(e) => {
+              setSelectedChapter(e.target.value);
+              setVideos([]);
+            }}
+            disabled={!selectedModule}
+            className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3 text-[var(--ink)] outline-none disabled:opacity-50 focus:border-[var(--accent-rust)]"
+          >
+            <option value="">-- Save directly under subject --</option>
+            {(currentModule?.chapters || []).map((chapter) => (
+              <option key={chapter.id} value={chapter.id}>
+                {chapter.title}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="space-y-4 rounded-[24px] border-2 border-dashed border-[var(--line)] bg-[var(--accent-cream)] p-6">
+        <h4 className="font-semibold text-[var(--ink)]">Upload Topic Video</h4>
+        <p className="text-sm text-[var(--ink-soft)]">
+          {currentChapter
+            ? `This topic will be added inside chapter "${currentChapter.title}".`
+            : 'If no chapter is selected, the topic is added directly under the subject.'}
+        </p>
+
+        <div>
+          <label className="block text-sm font-semibold text-[var(--ink)] mb-2">Topic Video File</label>
           <div
             className="relative rounded-2xl border-2 border-dashed border-[var(--line)] p-6 text-center cursor-pointer transition hover:border-[var(--accent-rust)]"
             onDragOver={(e) => e.preventDefault()}
@@ -288,12 +328,12 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
 
         <div className="grid gap-4 md:grid-cols-2">
           <div>
-            <label className="block text-sm font-semibold text-[var(--ink)] mb-2">Lesson Title</label>
+            <label className="block text-sm font-semibold text-[var(--ink)] mb-2">Topic Title</label>
             <input
               type="text"
               value={lessonTitle}
               onChange={(e) => setLessonTitle(e.target.value)}
-              placeholder="e.g., Arithmetic Basics - Part 1"
+              placeholder="e.g., Topic 1 - Theodolite setup"
               className="w-full rounded-2xl border border-[var(--line)] bg-white px-4 py-3 text-[var(--ink)] outline-none focus:border-[var(--accent-rust)]"
             />
           </div>
@@ -346,29 +386,31 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
           {uploading ? (
             <>
               <Loader className="h-5 w-5 animate-spin" />
-              Uploading...
+              Uploading topic...
             </>
           ) : (
             <>
               <Upload className="h-5 w-5" />
-              Upload Video
+              Upload Topic
             </>
           )}
         </button>
       </div>
 
-      {/* Videos in Module */}
       {selectedModule && currentModule && (
         <div className="space-y-4">
           <div>
             <h4 className="font-semibold text-[var(--ink)]">
-              Videos in "{currentModule.title}" ({videos.length})
+              Topics in "{currentChapter?.title || currentModule.title}" ({videos.length})
             </h4>
+            <p className="mt-1 text-sm text-[var(--ink-soft)]">
+              {currentChapter ? `Chapter inside ${currentModule.title}` : 'Direct topics under the selected subject'}
+            </p>
           </div>
 
           {videos.length === 0 ? (
             <div className="rounded-[24px] border border-dashed border-[var(--line)] p-6 text-center text-[var(--ink-soft)]">
-              No videos uploaded yet. Upload one above to get started.
+              No topics uploaded yet. Add one above to get started.
             </div>
           ) : (
             <div className="space-y-3">
@@ -427,11 +469,11 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
       <div className="rounded-[24px] bg-blue-50 p-4 text-sm text-blue-900">
         <p className="font-semibold mb-2">ℹ️ How it works:</p>
         <ul className="space-y-1 list-disc list-inside">
-          <li>Select a course and the module (section) where you want to add videos</li>
-          <li>Upload one or more videos for that module</li>
-          <li>Mark videos as premium if only enrolled students should access them</li>
-          <li>Videos appear automatically in the course curriculum for students</li>
-          <li>Manage or delete videos anytime using the buttons above</li>
+          <li>Select a course, then choose the subject and optional chapter where you want to add topics</li>
+          <li>Upload one or more topic videos in that learning path</li>
+          <li>Mark topics as premium if only enrolled students should access them</li>
+          <li>Topics appear automatically in the course curriculum for students</li>
+          <li>Manage or delete topics anytime using the buttons above</li>
         </ul>
       </div>
     </div>

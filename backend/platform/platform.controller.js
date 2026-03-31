@@ -1,113 +1,92 @@
 const { platformRepository } = require('../lib/repositories.js');
+const {
+  ApiError,
+  asyncHandler,
+  ok,
+  created,
+  requireString,
+  optionalString,
+  requireNumber,
+  requireBoolean,
+} = require('../lib/http.js');
 
-const getOverview = async (req, res) => {
-  try {
-    const requestedUserId = req.query.userId || null;
-    const userId = req.user?.role === 'admin'
-      ? requestedUserId || req.user?.id || null
-      : req.user?.id || null;
-    const overview = await platformRepository.getOverview(userId);
-    return res.json(overview);
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
+const getOverview = asyncHandler(async (req, res) => {
+  const requestedUserId = req.query.userId || null;
+  const userId = req.user?.role === 'admin'
+    ? requestedUserId || req.user?.id || null
+    : req.user?.id || null;
+  const overview = await platformRepository.getOverview(userId);
+  return ok(res, overview);
+});
+
+const seedPlatform = asyncHandler(async (_req, res) => {
+  const seedStatus = await platformRepository.ensureSeeded();
+  return ok(res, { message: 'Platform data initialized', status: seedStatus || 'ok' });
+});
+
+const enroll = asyncHandler(async (req, res) => {
+  const userId = req.user?.id || null;
+  const courseId = requireString(req.body?.courseId, 'courseId');
+  if (!userId) {
+    throw new ApiError(401, 'Authorization token required', { code: 'AUTH_REQUIRED' });
   }
-};
 
-const seedPlatform = async (req, res) => {
-  try {
-    const seedStatus = await platformRepository.ensureSeeded();
-    return res.json({ message: 'Platform data initialized', status: seedStatus || 'ok' });
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
+  const enrollment = await platformRepository.enroll({
+    userId,
+    courseId,
+    source: optionalString(req.body?.source, 'direct-access', { maxLength: 80 }),
+    accessType: optionalString(req.body?.accessType, 'course', { maxLength: 40 }),
+  });
+
+  return created(res, enrollment);
+});
+
+const subscribe = asyncHandler(async (req, res) => {
+  const userId = req.user?.id || null;
+  const planId = requireString(req.body?.planId, 'planId');
+  if (!userId) {
+    throw new ApiError(401, 'Authorization token required', { code: 'AUTH_REQUIRED' });
   }
-};
 
-const enroll = async (req, res) => {
-  try {
-    const userId = req.user?.id || null;
-    const { courseId, source, accessType } = req.body || {};
+  const subscription = await platformRepository.subscribe({
+    userId,
+    planId,
+    source: optionalString(req.body?.source, 'payment', { maxLength: 80 }),
+  });
 
-    if (!userId || !courseId) {
-      return res.status(400).json({ message: 'courseId is required' });
-    }
-
-    const enrollment = await platformRepository.enroll({
-      userId,
-      courseId,
-      source,
-      accessType,
-    });
-
-    return res.status(201).json(enrollment);
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
+  if (!subscription) {
+    throw new ApiError(404, 'Subscription plan not found', { code: 'PLAN_NOT_FOUND' });
   }
-};
 
-const subscribe = async (req, res) => {
-  try {
-    const userId = req.user?.id || null;
-    const { planId, source } = req.body || {};
+  return created(res, subscription);
+});
 
-    if (!userId || !planId) {
-      return res.status(400).json({ message: 'planId is required' });
-    }
-
-    const subscription = await platformRepository.subscribe({
-      userId,
-      planId,
-      source,
-    });
-
-    if (!subscription) {
-      return res.status(404).json({ message: 'Subscription plan not found' });
-    }
-
-    return res.status(201).json(subscription);
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
+const updateWatchProgress = asyncHandler(async (req, res) => {
+  const userId = req.user?.id || null;
+  const courseId = requireString(req.body?.courseId, 'courseId');
+  const lessonId = requireString(req.body?.lessonId, 'lessonId');
+  if (!userId) {
+    throw new ApiError(401, 'Authorization token required', { code: 'AUTH_REQUIRED' });
   }
-};
 
-const updateWatchProgress = async (req, res) => {
-  try {
-    const userId = req.user?.id || null;
-    const { courseId, lessonId, progressPercent, progressSeconds, completed } = req.body || {};
+  const watchRecord = await platformRepository.updateWatchProgress({
+    userId,
+    courseId,
+    lessonId,
+    progressPercent: requireNumber(req.body?.progressPercent ?? 0, 'progressPercent', { min: 0, max: 100 }),
+    progressSeconds: requireNumber(req.body?.progressSeconds ?? 0, 'progressSeconds', { min: 0 }),
+    completed: requireBoolean(req.body?.completed ?? false, 'completed'),
+  });
 
-    if (!userId || !courseId || !lessonId) {
-      return res.status(400).json({ message: 'courseId and lessonId are required' });
-    }
+  return ok(res, watchRecord);
+});
 
-    const watchRecord = await platformRepository.updateWatchProgress({
-      userId,
-      courseId,
-      lessonId,
-      progressPercent,
-      progressSeconds,
-      completed,
-    });
-
-    return res.json(watchRecord);
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
-  }
-};
-
-const askAi = async (req, res) => {
-  try {
-    const userId = req.user?.id || 'guest';
-    const { message } = req.body || {};
-
-    if (!message) {
-      return res.status(400).json({ message: 'message is required' });
-    }
-
-    const aiResponse = await platformRepository.askAi({ userId, message });
-    return res.json(aiResponse);
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
-  }
-};
+const askAi = asyncHandler(async (req, res) => {
+  const userId = req.user?.id || 'guest';
+  const message = requireString(req.body?.message, 'message', { maxLength: 2000 });
+  const aiResponse = await platformRepository.askAi({ userId, message });
+  return ok(res, aiResponse);
+});
 
 module.exports = {
   getOverview,

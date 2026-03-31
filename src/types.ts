@@ -26,9 +26,20 @@ export interface CourseLesson {
   locked?: boolean;
 }
 
+export interface CourseChapter {
+  id: string;
+  title: string;
+  description?: string;
+  order?: number;
+  lessons: CourseLesson[];
+}
+
 export interface CourseModule {
   id: string;
   title: string;
+  description?: string;
+  order?: number;
+  chapters?: CourseChapter[];
   lessons: CourseLesson[];
 }
 
@@ -48,8 +59,16 @@ export interface CourseCard {
   modules: CourseModule[];
   enrolled?: boolean;
   progressPercent?: number;
-  continueLesson?: (CourseLesson & { moduleTitle?: string }) | null;
+  continueLesson?: (CourseLesson & { moduleTitle?: string; chapterTitle?: string }) | null;
+  continueProgressSeconds?: number;
   lessonCount?: number;
+  lessonProgress?: {
+    lessonId: string;
+    progressPercent: number;
+    progressSeconds: number;
+    completed: boolean;
+    updatedAt: string;
+  }[];
 }
 
 export interface MockQuestion {

@@ -54,6 +54,25 @@ const buildAuthHeaders = () => {
   return token ? { authorization: `Bearer ${token}` } : {};
 };
 
+const parsePayload = async (response: Response) => {
+  const text = await response.text();
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { message: text };
+  }
+};
+
+const extractErrorMessage = (payload: any, path: string) =>
+  payload?.error
+  || payload?.message
+  || payload?.details?.message
+  || `Request failed for ${path}`;
+
 const request = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -63,11 +82,10 @@ const request = async <T>(path: string, options: RequestInit = {}): Promise<T> =
     },
   });
 
-  const text = await response.text();
-  const payload = text ? JSON.parse(text) : null;
+  const payload = await parsePayload(response);
 
   if (!response.ok) {
-    throw new Error(payload?.message || `Request failed for ${path}`);
+    throw new Error(extractErrorMessage(payload, path));
   }
 
   return payload as T;
@@ -82,11 +100,10 @@ const rootRequest = async <T>(path: string, options: RequestInit = {}): Promise<
     },
   });
 
-  const text = await response.text();
-  const payload = text ? JSON.parse(text) : null;
+  const payload = await parsePayload(response);
 
   if (!response.ok) {
-    throw new Error(payload?.error || payload?.message || `Request failed for ${path}`);
+    throw new Error(extractErrorMessage(payload, path));
   }
 
   return payload as T;
@@ -188,31 +205,34 @@ export const EduService = {
     });
   },
 
+  enrollInCourse: async (courseId: string, source = 'direct-access') => {
+    return request(`/platform/enroll`, {
+      method: 'POST',
+      body: JSON.stringify({
+        courseId,
+        source,
+        accessType: 'course',
+      }),
+    });
+  },
+
   unlockSubscription: async (plan: SubscriptionPlan) => {
-    const checkout = await request<{ _id: string; paymentUrl: string }>(`/payment/checkout`, {
-      method: 'POST',
-      body: JSON.stringify({
-        amount: plan.price,
-        currency: 'INR',
-        item: plan.title,
-      }),
-    });
-
-    await request(`/payment/webhook`, {
-      method: 'POST',
-      body: JSON.stringify({
-        event: 'payment.completed',
-        paymentId: checkout._id,
-        status: 'paid',
-      }),
-    });
-
-    return request(`/platform/subscribe`, {
+    return rootRequest<{ url: string; sessionId: string; paymentId: string }>(`/api/stripe/subscription-checkout`, {
       method: 'POST',
       body: JSON.stringify({
         planId: plan._id,
-        source: 'simulated-payment',
+        planTitle: plan.title,
+        price: plan.price,
+        billingCycle: plan.billingCycle,
+        origin: window.location.origin,
       }),
+    });
+  },
+
+  confirmSubscriptionPayment: async (sessionId: string, planId: string) => {
+    return rootRequest(`/api/stripe/confirm-subscription-payment`, {
+      method: 'POST',
+      body: JSON.stringify({ sessionId, planId }),
     });
   },
 
@@ -222,8 +242,10 @@ export const EduService = {
     progressPercent: number,
     progressSeconds: number,
     completed: boolean,
+    requestOptions: RequestInit = {},
   ) => {
     return request(`/platform/watch-progress`, {
+      ...requestOptions,
       method: 'POST',
       body: JSON.stringify({
         courseId,
@@ -289,6 +311,35 @@ export const EduService = {
 
   deleteCourseModule: async (courseId: string, moduleId: string) => {
     return request<{ message: string; moduleId: string; course: CourseCard }>(`/courses/${courseId}/modules/${moduleId}`, {
+      method: 'DELETE',
+    });
+  },
+
+  addChapterToModule: async (
+    courseId: string,
+    moduleId: string,
+    payload: { title: string; description?: string; order?: number },
+  ) => {
+    return request<{ message: string; chapter: unknown; course: CourseCard }>(`/courses/${courseId}/modules/${moduleId}/chapters`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updateChapterInModule: async (
+    courseId: string,
+    moduleId: string,
+    chapterId: string,
+    payload: { title?: string; description?: string; order?: number },
+  ) => {
+    return request<{ message: string; chapter: unknown; course: CourseCard }>(`/courses/${courseId}/modules/${moduleId}/chapters/${chapterId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteChapterFromModule: async (courseId: string, moduleId: string, chapterId: string) => {
+    return request<{ message: string; chapterId: string; course: CourseCard }>(`/courses/${courseId}/modules/${moduleId}/chapters/${chapterId}`, {
       method: 'DELETE',
     });
   },
@@ -359,6 +410,7 @@ export const EduService = {
     lessonTitle: string,
     durationMinutes?: number,
     isPremium?: boolean,
+    chapterId?: string,
   ) => {
     const formData = new FormData();
     formData.append('video', file);
@@ -367,6 +419,9 @@ export const EduService = {
     formData.append('lessonTitle', lessonTitle);
     formData.append('durationMinutes', String(durationMinutes || 0));
     formData.append('isPremium', String(isPremium || false));
+    if (chapterId) {
+      formData.append('chapterId', chapterId);
+    }
 
     // Using fetch directly for FormData/multipart
     const response = await fetch(`/backend/api/courses/${courseId}/modules/${moduleId}/videos`, {

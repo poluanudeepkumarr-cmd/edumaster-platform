@@ -11,6 +11,9 @@ const {
   deleteCourse,
   addModule,
   updateModule,
+  addChapter,
+  updateChapter,
+  deleteChapter,
   deleteModule,
   getCourseDetails,
   listCoursesAdmin,
@@ -31,6 +34,9 @@ router.delete('/:id', requireAuth, requireAdmin, deleteCourse);
 router.post('/:courseId/modules', requireAuth, requireAdmin, addModule);
 router.put('/:courseId/modules/:moduleId', requireAuth, requireAdmin, updateModule);
 router.delete('/:courseId/modules/:moduleId', requireAuth, requireAdmin, deleteModule);
+router.post('/:courseId/modules/:moduleId/chapters', requireAuth, requireAdmin, addChapter);
+router.put('/:courseId/modules/:moduleId/chapters/:chapterId', requireAuth, requireAdmin, updateChapter);
+router.delete('/:courseId/modules/:moduleId/chapters/:chapterId', requireAuth, requireAdmin, deleteChapter);
 
 // Admin routes - video upload and management
 router.post('/:courseId/modules/:moduleId/videos', requireAuth, requireAdmin, upload.single('video'), uploadVideoToModule);
