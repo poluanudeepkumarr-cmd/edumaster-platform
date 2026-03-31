@@ -27,6 +27,7 @@ app.set('trust proxy', appConfig.trustProxy);
 app.disable('x-powered-by');
 app.use(cors({ origin: appConfig.corsOrigin === '*' ? true : appConfig.corsOrigin }));
 app.use(express.json({ limit: appConfig.jsonBodyLimit }));
+app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 app.use(securityHeaders);
 app.use(basicRateLimit);
 

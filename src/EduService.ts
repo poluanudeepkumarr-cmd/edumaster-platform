@@ -49,6 +49,11 @@ const buildHeaders = (hasBody: boolean) => {
   };
 };
 
+const buildAuthHeaders = () => {
+  const token = readStoredToken();
+  return token ? { authorization: `Bearer ${token}` } : {};
+};
+
 const request = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -63,6 +68,25 @@ const request = async <T>(path: string, options: RequestInit = {}): Promise<T> =
 
   if (!response.ok) {
     throw new Error(payload?.message || `Request failed for ${path}`);
+  }
+
+  return payload as T;
+};
+
+const rootRequest = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
+  const response = await fetch(path, {
+    ...options,
+    headers: {
+      ...buildHeaders(Boolean(options.body)),
+      ...(options.headers || {}),
+    },
+  });
+
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : null;
+
+  if (!response.ok) {
+    throw new Error(payload?.error || payload?.message || `Request failed for ${path}`);
   }
 
   return payload as T;
@@ -146,31 +170,21 @@ export const EduService = {
   },
 
   unlockCourse: async (course: CourseCard) => {
-    const checkout = await request<{ _id: string; paymentUrl: string }>(`/payment/checkout`, {
-      method: 'POST',
-      body: JSON.stringify({
-        amount: course.price,
-        currency: 'INR',
-        item: course.title,
-      }),
-    });
-
-    await request(`/payment/webhook`, {
-      method: 'POST',
-      body: JSON.stringify({
-        event: 'payment.completed',
-        paymentId: checkout._id,
-        status: 'paid',
-      }),
-    });
-
-    return request(`/platform/enroll`, {
+    return rootRequest<{ url: string; sessionId: string; paymentId: string }>(`/api/stripe/course-checkout`, {
       method: 'POST',
       body: JSON.stringify({
         courseId: course._id,
-        source: 'simulated-payment',
-        accessType: 'course',
+        courseTitle: course.title,
+        price: course.price,
+        origin: window.location.origin,
       }),
+    });
+  },
+
+  confirmCoursePayment: async (sessionId: string, courseId: string) => {
+    return rootRequest(`/api/stripe/confirm-course-payment`, {
+      method: 'POST',
+      body: JSON.stringify({ sessionId, courseId }),
     });
   },
 
@@ -239,6 +253,46 @@ export const EduService = {
     });
   },
 
+  updateCourse: async (courseId: string, course: Partial<CourseCard>) => {
+    return request<CourseCard>(`/courses/${courseId}`, {
+      method: 'PUT',
+      body: JSON.stringify(course),
+    });
+  },
+
+  deleteCourse: async (courseId: string) => {
+    return request<{ message: string; courseId: string }>(`/courses/${courseId}`, {
+      method: 'DELETE',
+    });
+  },
+
+  addModuleToCourse: async (
+    courseId: string,
+    payload: { title: string; description?: string; order?: number },
+  ) => {
+    return request<{ message: string; module: unknown; course: CourseCard }>(`/courses/${courseId}/modules`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updateCourseModule: async (
+    courseId: string,
+    moduleId: string,
+    payload: { title?: string; description?: string; order?: number },
+  ) => {
+    return request<{ message: string; module: unknown; course: CourseCard }>(`/courses/${courseId}/modules/${moduleId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteCourseModule: async (courseId: string, moduleId: string) => {
+    return request<{ message: string; moduleId: string; course: CourseCard }>(`/courses/${courseId}/modules/${moduleId}`, {
+      method: 'DELETE',
+    });
+  },
+
   createMockTest: async (test: Partial<MockTest>) => {
     return request<MockTest>(`/tests`, {
       method: 'POST',
@@ -294,6 +348,56 @@ export const EduService = {
     return request<LiveChatMessage>(`/live-classes/${liveClassId}/chat`, {
       method: 'POST',
       body: JSON.stringify({ message, kind }),
+    });
+  },
+
+  // Video upload methods for admin
+  uploadVideoToModule: async (
+    courseId: string,
+    moduleId: string,
+    file: File,
+    lessonTitle: string,
+    durationMinutes?: number,
+    isPremium?: boolean,
+  ) => {
+    const formData = new FormData();
+    formData.append('video', file);
+    formData.append('courseId', courseId);
+    formData.append('moduleId', moduleId);
+    formData.append('lessonTitle', lessonTitle);
+    formData.append('durationMinutes', String(durationMinutes || 0));
+    formData.append('isPremium', String(isPremium || false));
+
+    // Using fetch directly for FormData/multipart
+    const response = await fetch(`/backend/api/courses/${courseId}/modules/${moduleId}/videos`, {
+      method: 'POST',
+      headers: buildAuthHeaders(),
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message || 'Upload failed');
+    }
+
+    return response.json();
+  },
+
+  listVideosInModule: async (courseId: string, moduleId: string) => {
+    return request(`/courses/${courseId}/modules/${moduleId}/videos`, {
+      method: 'GET',
+    });
+  },
+
+  deleteVideoFromModule: async (courseId: string, moduleId: string, videoId: string) => {
+    return request(`/courses/${courseId}/modules/${moduleId}/videos/${videoId}`, {
+      method: 'DELETE',
+    });
+  },
+
+  getVideoMetadata: async (courseId: string, moduleId: string, videoId: string) => {
+    return request(`/courses/${courseId}/modules/${moduleId}/videos/${videoId}`, {
+      method: 'GET',
     });
   },
 };

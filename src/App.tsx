@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   BellRing,
@@ -41,6 +41,8 @@ import {
 } from 'recharts';
 import { AuthProvider, useAuth } from './AuthContext';
 import { EduService } from './EduService';
+import { AdminModuleManager } from './components/AdminModuleManager';
+import { AdminVideoUpload } from './components/AdminVideoUpload';
 import {
   AiResponse,
   CourseCard,
@@ -633,6 +635,7 @@ const CoursesTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRef
   const [selectedLessonId, setSelectedLessonId] = useState<string | null>(null);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [busyCourseId, setBusyCourseId] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
   const selectedCourse = useMemo(
     () => overview.courses.find((course) => course._id === selectedCourseId) || overview.courses[0] || null,
     [overview.courses, selectedCourseId],
@@ -681,7 +684,72 @@ const CoursesTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRef
 
     setBusyCourseId(course._id);
     try {
-      await EduService.unlockCourse(course);
+      const checkout = await EduService.unlockCourse(course);
+      const popup = window.open(
+        checkout.url,
+        'edumaster-stripe-checkout',
+        'popup=yes,width=520,height=760',
+      );
+
+      if (!popup) {
+        throw new Error('Stripe popup was blocked. Please allow popups and try again.');
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const timeoutId = window.setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          window.removeEventListener('message', handleMessage);
+          reject(new Error('Payment confirmation timed out. If payment succeeded, refresh and try again.'));
+        }, 5 * 60 * 1000);
+
+        const closeWatcher = window.setInterval(() => {
+          if (popup.closed && !settled) {
+            settled = true;
+            window.clearTimeout(timeoutId);
+            window.clearInterval(closeWatcher);
+            window.removeEventListener('message', handleMessage);
+            reject(new Error('Payment window was closed before confirmation.'));
+          }
+        }, 500);
+
+        const handleMessage = async (event: MessageEvent) => {
+          if (event.origin !== window.location.origin) {
+            return;
+          }
+
+          const data = event.data || {};
+          if (data.type !== 'STRIPE_PAYMENT_SUCCESS' || data.courseId !== course._id || !data.sessionId) {
+            return;
+          }
+
+          try {
+            await EduService.confirmCoursePayment(data.sessionId, course._id);
+            if (!popup.closed) {
+              popup.close();
+            }
+            if (!settled) {
+              settled = true;
+              window.clearTimeout(timeoutId);
+              window.clearInterval(closeWatcher);
+              window.removeEventListener('message', handleMessage);
+              resolve();
+            }
+          } catch (error) {
+            if (!settled) {
+              settled = true;
+              window.clearTimeout(timeoutId);
+              window.clearInterval(closeWatcher);
+              window.removeEventListener('message', handleMessage);
+              reject(error instanceof Error ? error : new Error('Payment confirmation failed.'));
+            }
+          }
+        };
+
+        window.addEventListener('message', handleMessage);
+      });
+
       await onRefresh();
     } finally {
       setBusyCourseId(null);
@@ -711,6 +779,13 @@ const CoursesTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRef
   const selectedLesson = selectedLessonMeta?.lesson || null;
   const canAccessLesson = Boolean(selectedCourse?.enrolled || (!selectedLesson?.premium && !selectedLesson?.locked));
   const embedUrl = selectedLesson?.type === 'youtube' ? getYouTubeEmbedUrl(selectedLesson.videoUrl) : null;
+  const hostedVideoUrl = selectedLesson?.type === 'video' ? selectedLesson.videoUrl || null : null;
+
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.playbackRate = playbackSpeed;
+    }
+  }, [playbackSpeed, hostedVideoUrl]);
 
   return (
     <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
@@ -850,6 +925,17 @@ const CoursesTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRef
                       className="aspect-video w-full"
                       allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                       allowFullScreen
+                    />
+                  ) : canAccessLesson && hostedVideoUrl ? (
+                    <video
+                      key={hostedVideoUrl}
+                      ref={videoRef}
+                      src={hostedVideoUrl}
+                      controls
+                      controlsList="nodownload"
+                      playsInline
+                      preload="metadata"
+                      className="aspect-video w-full bg-black"
                     />
                   ) : canAccessLesson ? (
                     <div className="flex aspect-video flex-col justify-between p-6">
@@ -1967,6 +2053,9 @@ const AdminTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRefre
           </div>
         </section>
       </div>
+
+      <AdminVideoUpload courses={overview.courses || []} onVideoUploaded={onRefresh} />
+      <AdminModuleManager courses={overview.courses || []} onModulesChanged={onRefresh} />
 
       <div className="grid gap-6 xl:grid-cols-2">
         <section className="rounded-[30px] border border-white/70 bg-white/92 p-6 shadow-[0_20px_60px_rgba(15,23,42,0.07)]">

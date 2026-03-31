@@ -2009,6 +2009,56 @@ const coursesRepository = {
 
     return lessonListFromCourse(redactCourseForViewer(course, isEnrolled));
   },
+
+  async updateCourseModule(courseId, updatedCourse) {
+    if (isPostgresMode()) {
+      await upsertPgCourse({
+        _id: courseId,
+        ...updatedCourse,
+      });
+      return updatedCourse;
+    }
+
+    if (isMongoMode()) {
+      const updated = await Course.findByIdAndUpdate(
+        courseId,
+        {
+          title: updatedCourse.title,
+          description: updatedCourse.description,
+          category: updatedCourse.category,
+          exam: updatedCourse.exam,
+          subject: updatedCourse.subject,
+          level: updatedCourse.level,
+          price: Number(updatedCourse.price || 0),
+          validityDays: Number(updatedCourse.validityDays || 365),
+          thumbnailUrl: updatedCourse.thumbnailUrl,
+          instructor: updatedCourse.instructor,
+          officialChannelUrl: updatedCourse.officialChannelUrl,
+          modules: updatedCourse.modules,
+          createdBy: updatedCourse.createdBy || null,
+          created_at: updatedCourse.created_at,
+          updated_at: updatedCourse.updated_at || nowIso(),
+        },
+        { new: true },
+      );
+      return updated?.toObject?.() || updatedCourse;
+    }
+
+    const courseIndex = state.courses.findIndex((course) => course._id === String(courseId));
+    if (courseIndex === -1) {
+      return null;
+    }
+
+    state.courses[courseIndex] = {
+      ...state.courses[courseIndex],
+      ...clone(updatedCourse),
+      _id: state.courses[courseIndex]._id,
+      modules: clone(updatedCourse.modules || []),
+      updated_at: nowIso(),
+    };
+
+    return clone(state.courses[courseIndex]);
+  },
 };
 
 const testsRepository = {

@@ -10,6 +10,8 @@ dotenv.config();
 
 const require = createRequire(import.meta.url);
 const { app: backendApp } = require("./backend/server.cjs");
+const { requireAuth } = require("./backend/middleware/auth.js");
+const { paymentRepository, platformRepository } = require("./backend/lib/repositories.js");
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || "";
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
@@ -42,25 +44,33 @@ async function startServer() {
     });
   });
 
-  // API: Create Stripe Checkout Session
-  app.post("/api/create-checkout-session", async (req, res) => {
+  const resolveBaseUrl = (origin?: string) => {
+    let baseUrl = process.env.APP_URL || origin || "http://localhost:3000";
+    if (baseUrl.includes("ais-dev-")) {
+      baseUrl = baseUrl.replace("ais-dev-", "ais-pre-");
+    }
+    return baseUrl;
+  };
+
+  app.post("/api/stripe/course-checkout", requireAuth, async (req: any, res) => {
     try {
       if (!stripe) {
         return res.status(503).json({ error: "Stripe is not configured on this environment." });
       }
 
-      const { courseId, courseTitle, price, userId, origin } = req.body;
-
-      // Prioritize APP_URL from environment variables (Shared URL), then frontend origin, then localhost
-      let baseUrl = process.env.APP_URL || origin || 'http://localhost:3000';
-      
-      // AI Studio specific: Dev URLs (ais-dev-...) are protected and cause 403 on direct access.
-      // We must use the Shared URL (ais-pre-...) for Stripe redirects.
-      if (baseUrl.includes('ais-dev-')) {
-        baseUrl = baseUrl.replace('ais-dev-', 'ais-pre-');
+      const { courseId, courseTitle, price, origin } = req.body || {};
+      if (!courseId || !courseTitle || !price) {
+        return res.status(400).json({ error: "courseId, courseTitle, and price are required." });
       }
-      
-      console.log(`Using baseUrl for Stripe redirects: ${baseUrl}`);
+
+      const userId = req.user?.id;
+      const payment = await paymentRepository.createCheckout({
+        userId,
+        amount: price,
+        currency: "INR",
+        item: courseTitle,
+      });
+      const baseUrl = resolveBaseUrl(origin);
 
       const session = await stripe.checkout.sessions.create({
         payment_method_types: ["card"],
@@ -78,43 +88,72 @@ async function startServer() {
           },
         ],
         mode: "payment",
-        success_url: `${baseUrl}/payment-success?session_id={CHECKOUT_SESSION_ID}&course_id=${courseId}`,
+        success_url: `${baseUrl}/payment-success?session_id={CHECKOUT_SESSION_ID}&course_id=${courseId}&payment_id=${payment._id}`,
         cancel_url: `${baseUrl}/payment-cancel`,
         metadata: {
           courseId,
           userId,
+          paymentId: payment._id,
+          accessType: "course",
         },
       });
 
-      res.json({ url: session.url, sessionId: session.id });
+      res.json({ url: session.url, sessionId: session.id, paymentId: payment._id });
     } catch (error: any) {
       console.error("Stripe Error:", error);
       res.status(500).json({ error: error.message });
     }
   });
 
-  // API: Verify Stripe Session
-  app.get("/api/verify-session/:sessionId", async (req, res) => {
+  app.post("/api/stripe/confirm-course-payment", requireAuth, async (req: any, res) => {
     try {
       if (!stripe) {
         return res.status(503).json({ error: "Stripe is not configured on this environment." });
       }
 
-      const { sessionId } = req.params;
-      const session = await stripe.checkout.sessions.retrieve(sessionId);
-      
-      if (session.payment_status === 'paid') {
-        res.json({ 
-          status: 'paid', 
-          metadata: session.metadata,
-          courseId: session.metadata?.courseId,
-          userId: session.metadata?.userId
-        });
-      } else {
-        res.json({ status: session.payment_status });
+      const { sessionId, courseId } = req.body || {};
+      if (!sessionId || !courseId) {
+        return res.status(400).json({ error: "sessionId and courseId are required." });
       }
+
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+      const metadata = session.metadata || {};
+
+      if (session.payment_status !== "paid") {
+        return res.status(409).json({ error: `Payment is ${session.payment_status || "not completed"}.` });
+      }
+
+      if (metadata.userId !== req.user?.id || metadata.courseId !== courseId) {
+        return res.status(403).json({ error: "Stripe session does not belong to this student/course." });
+      }
+
+      if (!metadata.paymentId) {
+        return res.status(400).json({ error: "Stripe session is missing payment metadata." });
+      }
+
+      await paymentRepository.handleWebhook({
+        event: "payment.completed",
+        paymentId: metadata.paymentId,
+        status: "paid",
+        provider: "stripe",
+        sessionId,
+      });
+
+      const enrollment = await platformRepository.enroll({
+        userId: req.user.id,
+        courseId,
+        source: "stripe",
+        accessType: "course",
+      });
+
+      return res.json({
+        status: "paid",
+        enrollment,
+        courseId,
+        paymentId: metadata.paymentId,
+      });
     } catch (error: any) {
-      console.error("Verification Error:", error);
+      console.error("Stripe confirmation error:", error);
       res.status(500).json({ error: error.message });
     }
   });
@@ -195,7 +234,8 @@ async function startServer() {
             window.opener.postMessage({ 
               type: 'STRIPE_PAYMENT_SUCCESS',
               courseId: '${courseId}',
-              sessionId: '${sessionId}'
+              sessionId: '${sessionId}',
+              paymentId: '${req.query.payment_id || ""}'
             }, '*');
           }
         </script>
