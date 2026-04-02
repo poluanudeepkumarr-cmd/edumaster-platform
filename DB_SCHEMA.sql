@@ -190,6 +190,10 @@ CREATE TABLE daily_quiz_attempts (
 CREATE TABLE live_classes (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   course_id UUID REFERENCES courses(id) ON DELETE SET NULL,
+  module_id UUID,
+  module_title VARCHAR(160),
+  chapter_id UUID,
+  chapter_title VARCHAR(160),
   title VARCHAR(255) NOT NULL,
   provider VARCHAR(40) NOT NULL,
   room_reference VARCHAR(255),

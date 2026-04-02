@@ -23,5 +23,13 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "exclude": [
+    "node_modules",
+    "dist",
+    "build",
+    "uploads",
+    "private_uploads",
+    "backend/private_uploads"
+  ]
 }

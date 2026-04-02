@@ -39,6 +39,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     refreshSession().finally(() => setLoading(false));
   }, []);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return undefined;
+    }
+
+    const handleAuthExpired = () => {
+      setUser(null);
+    };
+
+    window.addEventListener('edumaster:auth-expired', handleAuthExpired);
+    return () => {
+      window.removeEventListener('edumaster:auth-expired', handleAuthExpired);
+    };
+  }, []);
+
   const login = async (email: string, password: string) => {
     const response = await EduService.login(email, password);
     setUser(response.user);

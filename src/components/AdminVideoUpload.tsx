@@ -1,6 +1,18 @@
-import React, { useState, useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { Upload, Trash2, Play, Lock, Loader, AlertCircle, CheckCircle } from 'lucide-react';
 import { EduService } from '../EduService';
+
+const MAX_VIDEO_UPLOAD_MB = Number(import.meta.env.VITE_MAX_VIDEO_UPLOAD_MB || 2048);
+const MAX_VIDEO_UPLOAD_BYTES = MAX_VIDEO_UPLOAD_MB * 1024 * 1024;
+const VALID_VIDEO_MIME_TYPES = new Set([
+  'video/mp4',
+  'video/webm',
+  'video/ogg',
+  'video/quicktime',
+  'video/x-matroska',
+  'application/x-matroska',
+]);
+const VALID_VIDEO_EXTENSIONS = ['.mp4', '.webm', '.ogg', '.mov', '.mkv'];
 
 interface Video {
   id: string;
@@ -10,6 +22,10 @@ interface Video {
   premium?: boolean;
   uploadedAt?: string;
   fileSize?: number;
+  deliveryProfile?: string | null;
+  hlsProcessingStatus?: string | null;
+  hlsProcessingError?: string | null;
+  targetQualities?: string[];
 }
 
 interface Module {
@@ -77,21 +93,21 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
   const handleVideoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      // Max 500MB
-      if (file.size > 500 * 1024 * 1024) {
+      if (file.size > MAX_VIDEO_UPLOAD_BYTES) {
         setUploadStatus({
           type: 'error',
-          message: 'Video file too large. Maximum 500MB allowed.',
+          message: `Video file too large. Maximum ${MAX_VIDEO_UPLOAD_MB}MB allowed.`,
         });
         return;
       }
 
-      // Check video type
-      const validTypes = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'];
-      if (!validTypes.includes(file.type)) {
+      const lowerName = file.name.toLowerCase();
+      const hasValidExtension = VALID_VIDEO_EXTENSIONS.some((extension) => lowerName.endsWith(extension));
+      const hasValidMimeType = !file.type || VALID_VIDEO_MIME_TYPES.has(file.type);
+      if (!hasValidExtension && !hasValidMimeType) {
         setUploadStatus({
           type: 'error',
-          message: 'Invalid video format. Supported: MP4, WebM, OGG, MOV',
+          message: 'Invalid video format. Supported: MP4, WebM, OGG, MOV, MKV',
         });
         return;
       }
@@ -105,7 +121,7 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
     if (!videoFile || !selectedCourse || !selectedModule || !lessonTitle) {
       setUploadStatus({
         type: 'error',
-        message: 'Please select course, subject, topic file, and enter a topic title',
+        message: 'Please select course, subject, choose a recording file, and enter a topic title',
       });
       return;
     }
@@ -209,7 +225,7 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
       <div>
         <h3 className="text-2xl font-semibold text-[var(--ink)]">Video Upload Manager</h3>
         <p className="mt-1 text-sm text-[var(--ink-soft)]">
-          Upload topic videos inside a course subject and optional chapter so students see the same learning structure.
+          Upload topic videos into private hosting inside a course subject and optional chapter so students see the same learning structure.
         </p>
       </div>
 
@@ -286,7 +302,7 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
         </p>
 
         <div>
-          <label className="block text-sm font-semibold text-[var(--ink)] mb-2">Topic Video File</label>
+          <label className="block text-sm font-semibold text-[var(--ink)] mb-2">Session Recording File</label>
           <div
             className="relative rounded-2xl border-2 border-dashed border-[var(--line)] p-6 text-center cursor-pointer transition hover:border-[var(--accent-rust)]"
             onDragOver={(e) => e.preventDefault()}
@@ -315,7 +331,7 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
               <Upload className="h-8 w-8 text-[var(--accent-rust)]" />
               <div>
                 <p className="font-semibold text-[var(--ink)]">Drag & drop or click to select</p>
-                <p className="text-sm text-[var(--ink-soft)]">MP4, WebM, OGG, MOV • Max 500MB</p>
+                <p className="text-sm text-[var(--ink-soft)]">MP4, WebM, OGG, MOV, MKV • Max {MAX_VIDEO_UPLOAD_MB}MB • Stored privately with signed playback access</p>
               </div>
             </div>
             {videoFile && (
@@ -391,7 +407,7 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
           ) : (
             <>
               <Upload className="h-5 w-5" />
-              Upload Topic
+              Upload To Private Hosting
             </>
           )}
         </button>
@@ -430,11 +446,37 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
                     </div>
                     <div className="mt-1 flex flex-wrap gap-3 text-xs text-[var(--ink-soft)]">
                       <span>Duration: {video.durationMinutes || 0} min</span>
-                      <span>•</span>
-                      <span>Size: {formatFileSize(video.fileSize || 0)}</span>
+                      {Boolean(video.fileSize) && (
+                        <>
+                          <span>•</span>
+                          <span>Size: {formatFileSize(video.fileSize || 0)}</span>
+                        </>
+                      )}
                       <span>•</span>
                       <span>{formatDate(video.uploadedAt)}</span>
+                      {video.deliveryProfile && (
+                        <>
+                          <span>•</span>
+                          <span>Profile: {video.deliveryProfile}</span>
+                        </>
+                      )}
+                      {video.hlsProcessingStatus && (
+                        <>
+                          <span>•</span>
+                          <span>Processing: {video.hlsProcessingStatus}</span>
+                        </>
+                      )}
                     </div>
+                    {video.targetQualities?.length ? (
+                      <p className="mt-2 text-xs text-[var(--ink-soft)]">
+                        Cost-saver targets: {video.targetQualities.join(', ')}
+                      </p>
+                    ) : null}
+                    {video.hlsProcessingError ? (
+                      <p className="mt-2 text-xs text-red-600">
+                        HLS processing issue: {video.hlsProcessingError}
+                      </p>
+                    ) : null}
                   </div>
 
                   <div className="flex gap-2">
@@ -470,9 +512,11 @@ export const AdminVideoUpload: React.FC<AdminVideoUploadProps> = ({ courses, onV
         <p className="font-semibold mb-2">ℹ️ How it works:</p>
         <ul className="space-y-1 list-disc list-inside">
           <li>Select a course, then choose the subject and optional chapter where you want to add topics</li>
-          <li>Upload one or more topic videos in that learning path</li>
-          <li>Mark topics as premium if only enrolled students should access them</li>
-          <li>Topics appear automatically in the course curriculum for students</li>
+          <li>Upload your recorded session file here and the backend stores it in private hosting outside public lesson URLs</li>
+          <li>New uploads are queued for lower-cost adaptive delivery so popular long lectures can shift to cheaper HLS playback</li>
+          <li>Students receive only short-lived signed playback links from the secure backend API</li>
+          <li>Mark topics as premium so only enrolled students can request playback tokens and access the stream</li>
+          <li>Topics appear in order and later topics can stay locked until the previous topic is completed</li>
           <li>Manage or delete topics anytime using the buttons above</li>
         </ul>
       </div>

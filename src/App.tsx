@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRight,
   BellRing,
@@ -43,15 +43,23 @@ import { AuthProvider, useAuth } from './AuthContext';
 import { CoursesTab } from './components/CoursesTab';
 import { EduService } from './EduService';
 import { AdminCourseManager } from './components/AdminCourseManager';
+import { AdminLiveClassManager } from './components/AdminLiveClassManager';
 import { AdminModuleManager } from './components/AdminModuleManager';
+import { LiveBroadcastViewer } from './components/LiveBroadcastViewer';
+import { ProtectedLivePlayback } from './components/ProtectedLivePlayback';
 import { AdminVideoUpload } from './components/AdminVideoUpload';
+import Hls from 'hls.js';
 import {
   AiResponse,
   DailyQuizResult,
   LiveChatMessage,
+  LiveClassAccess,
   MockTest,
+  NotificationItem,
   PlatformOverview,
+  ProtectedLessonPlayback,
   RegisterPayload,
+  SavedTopic,
   TestAttemptResult,
 } from './types';
 import { cn } from './lib/utils';
@@ -98,11 +106,55 @@ const formatPlaybackTime = (seconds: number) => {
   return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
 };
 
+const buildSavedTopicsKey = (userId: string) => `edumaster.saved-topics.${userId}`;
+
+const flattenCourseLessons = (course: PlatformOverview['courses'][number]) =>
+  (course.modules || []).flatMap((module) => ([
+    ...(module.lessons || []).map((lesson) => ({
+      lesson,
+      moduleTitle: module.title,
+      chapterTitle: null as string | null,
+    })),
+    ...((module.chapters || []).flatMap((chapter) =>
+      (chapter.lessons || []).map((lesson) => ({
+        lesson,
+        moduleTitle: module.title,
+        chapterTitle: chapter.title,
+      })))),
+  ]));
+
 const formatEventLabel = (eventType: string) =>
   eventType
     .split('_')
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
+
+const getNotificationNavigationTarget = (notification: NotificationItem) => {
+  if (notification.type === 'live-class-started' && notification.entityId) {
+    return {
+      tab: 'live' as TabKey,
+      liveClassId: notification.entityId,
+    };
+  }
+
+  if (notification.actionUrl && typeof window !== 'undefined') {
+    try {
+      const targetUrl = new URL(notification.actionUrl, window.location.origin);
+      const tab = targetUrl.searchParams.get('tab');
+      const liveClassId = targetUrl.searchParams.get('liveClassId');
+      if (tab === 'live' && liveClassId) {
+        return {
+          tab: 'live' as TabKey,
+          liveClassId,
+        };
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+};
 
 const SectionHeader = ({ title, caption, action }: { title: string; caption: string; action?: React.ReactNode }) => (
   <div className="flex items-end justify-between gap-4">
@@ -372,8 +424,13 @@ const Shell = ({
   onLogout,
   onRefresh,
   resumeTarget,
+  liveNavigationTarget,
   onContinueLearningNavigate,
+  onOpenNotification,
   onResumeNavigationHandled,
+  savedTopicIds,
+  savedTopics,
+  onToggleSavedTopic,
 }: {
   overview: PlatformOverview;
   activeTab: TabKey;
@@ -381,8 +438,13 @@ const Shell = ({
   onLogout: () => Promise<void>;
   onRefresh: () => Promise<void>;
   resumeTarget: { courseId: string; lessonId?: string | null } | null;
+  liveNavigationTarget: string | null;
   onContinueLearningNavigate: (courseId: string, lessonId?: string | null) => void;
+  onOpenNotification: (notification: NotificationItem) => void;
   onResumeNavigationHandled: () => void;
+  savedTopicIds: string[];
+  savedTopics: SavedTopic[];
+  onToggleSavedTopic: (courseId: string, lessonId: string) => void;
 }) => {
   const { user, isAdmin } = useAuth();
 
@@ -468,6 +530,8 @@ const Shell = ({
           {activeTab === 'overview' && (
             <OverviewTab
               overview={overview}
+              savedTopics={savedTopics}
+              onOpenNotification={onOpenNotification}
               onContinueLearning={(courseId, lessonId) => {
                 onContinueLearningNavigate(courseId, lessonId);
                 setActiveTab('courses');
@@ -481,11 +545,13 @@ const Shell = ({
               initialCourseId={resumeTarget?.courseId}
               initialLessonId={resumeTarget?.lessonId || null}
               onResumeNavigationHandled={onResumeNavigationHandled}
+              savedTopicIds={savedTopicIds}
+              onToggleSavedTopic={onToggleSavedTopic}
             />
           )}
           {activeTab === 'tests' && <TestsTab overview={overview} onRefresh={onRefresh} />}
           {activeTab === 'quiz' && <QuizTab overview={overview} onRefresh={onRefresh} />}
-          {activeTab === 'live' && <LiveTab overview={overview} />}
+          {activeTab === 'live' && <LiveTab overview={overview} onRefresh={onRefresh} initialLiveClassId={liveNavigationTarget} />}
           {activeTab === 'analytics' && <AnalyticsTab overview={overview} />}
           {activeTab === 'plans' && <PlansTab overview={overview} onRefresh={onRefresh} />}
           {activeTab === 'admin' && overview.adminOverview && <AdminTab overview={overview} onRefresh={onRefresh} />}
@@ -516,9 +582,13 @@ const Shell = ({
 const OverviewTab = ({
   overview,
   onContinueLearning,
+  onOpenNotification,
+  savedTopics,
 }: {
   overview: PlatformOverview;
   onContinueLearning: (courseId: string, lessonId?: string | null) => void;
+  onOpenNotification: (notification: NotificationItem) => void;
+  savedTopics: SavedTopic[];
 }) => (
   <div className="space-y-6">
     <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
@@ -541,7 +611,12 @@ const OverviewTab = ({
         <SectionHeader title="Action queue" caption="Right now" />
         <div className="mt-6 space-y-4">
           {overview.notifications.map((item) => (
-            <div key={item._id} className="rounded-[24px] border border-[var(--line)] bg-[var(--accent-cream)] p-4">
+            <button
+              key={item._id}
+              type="button"
+              onClick={() => onOpenNotification(item)}
+              className="w-full rounded-[24px] border border-[var(--line)] bg-[var(--accent-cream)] p-4 text-left transition hover:border-[var(--accent-rust)]/40"
+            >
               <div className="flex items-start gap-3">
                 <div className="mt-1 flex h-10 w-10 items-center justify-center rounded-2xl bg-white">
                   <BellRing className="h-4 w-4 text-[var(--accent-rust)]" />
@@ -549,10 +624,15 @@ const OverviewTab = ({
                 <div>
                   <p className="font-medium text-[var(--ink)]">{item.title}</p>
                   <p className="mt-1 text-sm leading-6 text-[var(--ink-soft)]">{item.message}</p>
+                  {(item.actionLabel || getNotificationNavigationTarget(item)) && (
+                    <p className="mt-3 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--accent-rust)]">
+                      {item.actionLabel || 'Open now'}
+                    </p>
+                  )}
                   <p className="mt-2 text-xs uppercase tracking-[0.2em] text-[var(--ink-soft)]">{formatDateTime(item.createdAt)}</p>
                 </div>
               </div>
-            </div>
+            </button>
           ))}
         </div>
       </div>
@@ -653,6 +733,61 @@ const OverviewTab = ({
               </div>
             </div>
           )}
+        </div>
+      </div>
+    </section>
+
+    <section className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
+      <div className="rounded-[30px] border border-white/70 bg-white/92 p-6 shadow-[0_22px_70px_rgba(15,23,42,0.07)]">
+        <SectionHeader title="Saved topics" caption="Quick return" />
+        <div className="mt-6 space-y-3">
+          {savedTopics.length > 0 ? savedTopics.slice(0, 6).map((topic) => (
+            <button
+              key={`${topic.courseId}:${topic.lessonId}`}
+              onClick={() => onContinueLearning(topic.courseId, topic.lessonId)}
+              className="w-full rounded-[22px] border border-[var(--line)] bg-[var(--accent-cream)] p-4 text-left transition hover:border-[var(--accent-rust)]"
+            >
+              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--ink-soft)]">{topic.exam}</p>
+              <h3 className="mt-2 text-base font-semibold text-[var(--ink)]">{topic.lessonTitle}</h3>
+              <p className="mt-1 text-sm text-[var(--ink-soft)]">{topic.courseTitle}</p>
+              <p className="mt-3 text-xs uppercase tracking-[0.18em] text-[var(--ink-soft)]">
+                {topic.chapterTitle ? `${topic.moduleTitle} • ${topic.chapterTitle}` : topic.moduleTitle || 'Saved topic'}
+                {topic.progressSeconds ? ` • resume at ${formatPlaybackTime(topic.progressSeconds)}` : ''}
+              </p>
+            </button>
+          )) : (
+            <div className="rounded-[24px] border border-dashed border-[var(--line)] p-6 text-sm text-[var(--ink-soft)]">
+              Save important topics while studying and they will appear here for faster revision.
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="rounded-[30px] border border-white/70 bg-white/92 p-6 shadow-[0_22px_70px_rgba(15,23,42,0.07)]">
+        <SectionHeader title="Study focus" caption="What to do next" />
+        <div className="mt-6 grid gap-4 md:grid-cols-3">
+          <div className="rounded-[24px] bg-[var(--accent-cream)] p-4">
+            <p className="text-sm text-[var(--ink-soft)]">Active courses</p>
+            <p className="mt-2 text-3xl font-semibold text-[var(--ink)]">{overview.courses.filter((course) => course.enrolled).length}</p>
+          </div>
+          <div className="rounded-[24px] bg-[var(--accent-cream)] p-4">
+            <p className="text-sm text-[var(--ink-soft)]">Saved topics</p>
+            <p className="mt-2 text-3xl font-semibold text-[var(--ink)]">{savedTopics.length}</p>
+          </div>
+          <div className="rounded-[24px] bg-[var(--accent-cream)] p-4">
+            <p className="text-sm text-[var(--ink-soft)]">Continue queue</p>
+            <p className="mt-2 text-3xl font-semibold text-[var(--ink)]">{overview.dashboard.continueLearning.length}</p>
+          </div>
+        </div>
+        <div className="mt-5 rounded-[24px] border border-[var(--line)] p-4">
+          <p className="text-sm font-semibold text-[var(--ink)]">Recommended next action</p>
+          <p className="mt-2 text-sm leading-7 text-[var(--ink-soft)]">
+            {overview.dashboard.continueLearning[0]
+              ? `Resume ${overview.dashboard.continueLearning[0].continueLesson?.title || overview.dashboard.continueLearning[0].title} and finish that study streak before starting a new topic.`
+              : savedTopics[0]
+                ? `Revisit your saved topic ${savedTopics[0].lessonTitle} for revision or note-making.`
+                : 'Start one course topic and save key lessons so your revision queue becomes easier to manage.'}
+          </p>
         </div>
       </div>
     </section>
@@ -1078,20 +1213,241 @@ const QuizTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRefres
   );
 };
 
-const LiveTab = ({ overview }: { overview: PlatformOverview }) => {
+const LiveTab = ({
+  overview,
+  onRefresh,
+  initialLiveClassId = null,
+}: {
+  overview: PlatformOverview;
+  onRefresh: () => Promise<void>;
+  initialLiveClassId?: string | null;
+}) => {
   const { user } = useAuth();
-  const [selectedLiveClassId, setSelectedLiveClassId] = useState<string | null>(overview.liveClasses[0]?._id || null);
+  const [selectedLiveClassId, setSelectedLiveClassId] = useState<string | null>(initialLiveClassId || overview.liveClasses[0]?._id || null);
   const [chatMessages, setChatMessages] = useState<LiveChatMessage[]>([]);
   const [chatMessage, setChatMessage] = useState('');
   const [chatKind, setChatKind] = useState<'chat' | 'doubt'>('chat');
   const [chatBusy, setChatBusy] = useState(false);
+  const [access, setAccess] = useState<LiveClassAccess | null>(null);
+  const [accessBusy, setAccessBusy] = useState(false);
+  const [adminBusy, setAdminBusy] = useState(false);
+  const [adminMessage, setAdminMessage] = useState<string | null>(null);
+  const [recordingState, setRecordingState] = useState<'idle' | 'recording' | 'saving'>('idle');
+  const [adminCourseId, setAdminCourseId] = useState('');
+  const [adminModuleId, setAdminModuleId] = useState('');
+  const [adminChapterId, setAdminChapterId] = useState('');
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const recordingContextRef = useRef<{
+    liveClassId: string;
+    title: string;
+    durationMinutes: number;
+    courseId: string;
+    moduleId: string;
+    chapterId: string | null;
+  } | null>(null);
   const selectedLiveClass = useMemo(
     () => overview.liveClasses.find((item) => item._id === selectedLiveClassId) || overview.liveClasses[0] || null,
     [overview.liveClasses, selectedLiveClassId],
   );
+  const adminSelectedCourse = useMemo(
+    () => overview.courses.find((course) => course._id === adminCourseId) || null,
+    [overview.courses, adminCourseId],
+  );
+  const adminSelectedModule = useMemo(
+    () => adminSelectedCourse?.modules?.find((module) => module.id === adminModuleId) || null,
+    [adminSelectedCourse, adminModuleId],
+  );
 
   useEffect(() => {
+    if (initialLiveClassId && overview.liveClasses.some((item) => item._id === initialLiveClassId)) {
+      setSelectedLiveClassId(initialLiveClassId);
+    }
+  }, [initialLiveClassId, overview.liveClasses]);
+
+  useEffect(() => {
+    setAdminCourseId(selectedLiveClass?.courseId || '');
+    setAdminModuleId(selectedLiveClass?.moduleId || '');
+    setAdminChapterId(selectedLiveClass?.chapterId || '');
+  }, [selectedLiveClass?._id, selectedLiveClass?.courseId, selectedLiveClass?.moduleId, selectedLiveClass?.chapterId]);
+
+  const stopRecordingTracks = () => {
+    recordingStreamRef.current?.getTracks().forEach((track) => track.stop());
+    recordingStreamRef.current = null;
+  };
+
+  const clearRecordingSession = () => {
+    mediaRecorderRef.current = null;
+    recordedChunksRef.current = [];
+    recordingContextRef.current = null;
+    stopRecordingTracks();
+    setRecordingState('idle');
+  };
+
+  const buildRecordingContext = (liveClass = selectedLiveClass) => {
+    if (!liveClass?._id) {
+      throw new Error('Choose a live class first.');
+    }
+
+    if (!adminCourseId || !adminModuleId) {
+      throw new Error('Choose the course and subject before starting this live class.');
+    }
+
+    return {
+      liveClassId: liveClass._id,
+      title: liveClass.title,
+      durationMinutes: liveClass.durationMinutes,
+      courseId: adminCourseId,
+      moduleId: adminModuleId,
+      chapterId: adminChapterId || null,
+    };
+  };
+
+  const startLectureRecording = async (context = buildRecordingContext()) => {
+    if (recordingState === 'recording') {
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('This browser does not support live recording.');
+    }
+
+    if (typeof MediaRecorder === 'undefined') {
+      throw new Error('Media recording is not supported in this browser.');
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 24, max: 30 },
+      },
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    });
+
+    recordingStreamRef.current = stream;
+    recordedChunksRef.current = [];
+
+    const recorder = new MediaRecorder(
+      stream,
+      MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
+        ? { mimeType: 'video/webm;codecs=vp9,opus' }
+        : MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
+          ? { mimeType: 'video/webm;codecs=vp8,opus' }
+          : undefined,
+    );
+
+    recorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        recordedChunksRef.current.push(event.data);
+      }
+    };
+
+    recorder.onstop = () => {
+      stopRecordingTracks();
+    };
+
+    recorder.start(1000);
+    mediaRecorderRef.current = recorder;
+    recordingContextRef.current = context;
+    setRecordingState('recording');
+  };
+
+  const stopLectureRecording = async () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
+      clearRecordingSession();
+      return null;
+    }
+
+    setRecordingState('saving');
+
+    const recordedFile = await new Promise<File | null>((resolve) => {
+      const recordingContext = recordingContextRef.current;
+      recorder.onstop = () => {
+        const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || 'video/webm' });
+        clearRecordingSession();
+
+        if (!blob.size) {
+          resolve(null);
+          return;
+        }
+
+        const extension = recorder.mimeType.includes('mp4') ? 'mp4' : 'webm';
+        const safeTitle = (recordingContext?.title || 'live-class').replace(/\s+/g, '-').toLowerCase();
+        resolve(new File([blob], `${safeTitle}-${Date.now()}.${extension}`, {
+          type: recorder.mimeType || `video/${extension}`,
+        }));
+      };
+      recorder.stop();
+    });
+
+    return recordedFile;
+  };
+
+  const discardLectureRecording = async () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state === 'inactive') {
+      clearRecordingSession();
+      return;
+    }
+
+    setRecordingState('saving');
+    await new Promise<void>((resolve) => {
+      recorder.onstop = () => {
+        clearRecordingSession();
+        resolve();
+      };
+      recorder.stop();
+    });
+  };
+
+  const uploadLectureRecording = async (recordedFile: File, context = recordingContextRef.current) => {
+    if (!context?.courseId || !context?.moduleId) {
+      throw new Error('Map this live class to a course and subject before saving the recording.');
+    }
+
+    const upload = await EduService.uploadVideoToModule(
+      context.courseId,
+      context.moduleId,
+      recordedFile,
+      `${context.title} Recording`,
+      context.durationMinutes,
+      true,
+      context.chapterId || undefined,
+    ) as any;
+
+    return upload?.video?.id || null;
+  };
+
+  const syncLiveClassPath = async () => {
     if (!selectedLiveClass?._id) {
+      throw new Error('Choose a live class first.');
+    }
+
+    if (!adminCourseId || !adminModuleId) {
+      throw new Error('Choose the course and subject before starting this live class.');
+    }
+
+    const nextPayload: Partial<typeof selectedLiveClass> = {
+      courseId: adminCourseId,
+      moduleId: adminModuleId,
+      moduleTitle: adminSelectedModule?.title || null,
+      chapterId: adminChapterId || null,
+      chapterTitle: adminSelectedModule?.chapters?.find((chapter) => chapter.id === adminChapterId)?.title || null,
+      replayCourseId: adminCourseId,
+    };
+
+    await EduService.updateLiveClass(selectedLiveClass._id, nextPayload);
+  };
+
+  useEffect(() => {
+    if (!selectedLiveClass?._id || !user) {
+      setChatMessages([]);
       return;
     }
 
@@ -1109,7 +1465,37 @@ const LiveTab = ({ overview }: { overview: PlatformOverview }) => {
     return () => {
       cancelled = true;
     };
-  }, [selectedLiveClass?._id]);
+  }, [selectedLiveClass?._id, user]);
+
+  useEffect(() => {
+    if (!selectedLiveClass?._id || !user) {
+      setAccess(null);
+      return;
+    }
+
+    let cancelled = false;
+    setAccessBusy(true);
+    void EduService.getLiveClassAccess(selectedLiveClass._id)
+      .then((payload) => {
+        if (!cancelled) {
+          setAccess(payload);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAccess(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setAccessBusy(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedLiveClass?._id, user]);
 
   const sendLiveMessage = async () => {
     if (!selectedLiveClass || !user || !chatMessage.trim()) {
@@ -1127,6 +1513,186 @@ const LiveTab = ({ overview }: { overview: PlatformOverview }) => {
     }
   };
 
+  const refreshLiveAccess = async () => {
+    if (!selectedLiveClass?._id || !user) {
+      return;
+    }
+
+    setAccessBusy(true);
+    try {
+      const payload = await EduService.getLiveClassAccess(selectedLiveClass._id);
+      setAccess(payload);
+    } catch {
+      setAccess(null);
+    } finally {
+      setAccessBusy(false);
+    }
+  };
+
+  const handleLiveClassSelection = async (nextLiveClassId: string) => {
+    if (nextLiveClassId === selectedLiveClassId) {
+      return;
+    }
+
+    if (recordingState === 'saving') {
+      setAdminMessage('Please wait until the current recording finishes saving.');
+      return;
+    }
+
+    if (recordingState === 'recording') {
+      const shouldDiscard = window.confirm('A recording is still running. Switch classes and discard the current unsaved recording?');
+      if (!shouldDiscard) {
+        return;
+      }
+      await discardLectureRecording();
+      setAdminMessage('The unfinished recording was discarded before switching classes.');
+    }
+
+    setSelectedLiveClassId(nextLiveClassId);
+  };
+
+  const adminStartLive = async () => {
+    if (!selectedLiveClass?._id) {
+      return;
+    }
+
+    setAdminBusy(true);
+    setAdminMessage(null);
+    try {
+      await syncLiveClassPath();
+      const recordingContext = buildRecordingContext(selectedLiveClass);
+      let recordingWarning: string | null = null;
+
+      try {
+        await startLectureRecording(recordingContext);
+      } catch (error) {
+        recordingWarning = error instanceof Error ? error.message : 'Recording could not be started automatically.';
+      }
+
+      await EduService.startLiveClass(selectedLiveClass._id);
+      await onRefresh();
+      await refreshLiveAccess();
+
+      setAdminMessage(
+        recordingWarning
+          ? `Live class started, but automatic recording could not begin: ${recordingWarning}`
+          : 'Live class started and recording began automatically.',
+      );
+    } catch (error) {
+      if (mediaRecorderRef.current?.state && mediaRecorderRef.current.state !== 'inactive') {
+        await discardLectureRecording().catch(() => undefined);
+      }
+      setAdminMessage(error instanceof Error ? error.message : 'Unable to start live class.');
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  const adminEndLive = async () => {
+    if (!selectedLiveClass?._id) {
+      return;
+    }
+
+    setAdminBusy(true);
+    setAdminMessage(null);
+    try {
+      const liveClassId = selectedLiveClass._id;
+      const recordingContext = recordingContextRef.current || (() => {
+        try {
+          return buildRecordingContext(selectedLiveClass);
+        } catch {
+          return null;
+        }
+      })();
+      const recordedFile = await stopLectureRecording();
+      let replayLessonId = selectedLiveClass.replayLessonId || null;
+      let uploadError: string | null = null;
+
+      if (recordedFile) {
+        try {
+          replayLessonId = await uploadLectureRecording(recordedFile, recordingContext);
+        } catch (error) {
+          uploadError = error instanceof Error ? error.message : 'Recording upload failed.';
+        }
+      }
+
+      await EduService.endLiveClass(liveClassId, {
+        replayAvailable: Boolean(replayLessonId),
+        replayCourseId: recordingContext?.courseId || selectedLiveClass.courseId || null,
+        replayLessonId,
+        recordingUrl: null,
+      });
+      await onRefresh();
+      await refreshLiveAccess();
+      setAdminMessage(
+        replayLessonId
+          ? 'Live class ended and the recording was saved under the selected topic.'
+          : uploadError
+            ? `Live class ended, but the recording could not be saved: ${uploadError}`
+            : 'Live class ended. No recording file was available to save.',
+      );
+    } catch (error) {
+      setAdminMessage(error instanceof Error ? error.message : 'Unable to end live class.');
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  const adminStartRecordingOnly = async () => {
+    setAdminBusy(true);
+    setAdminMessage(null);
+    try {
+      await syncLiveClassPath();
+      const recordingContext = buildRecordingContext(selectedLiveClass);
+      await startLectureRecording(recordingContext);
+      setAdminMessage('Lecture recording started.');
+    } catch (error) {
+      setAdminMessage(error instanceof Error ? error.message : 'Unable to start recording.');
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  const adminStopRecordingOnly = async () => {
+    setAdminBusy(true);
+    setAdminMessage(null);
+    try {
+      const recordingContext = recordingContextRef.current || (() => {
+        try {
+          return buildRecordingContext(selectedLiveClass);
+        } catch {
+          return null;
+        }
+      })();
+      const recordedFile = await stopLectureRecording();
+      if (!recordedFile) {
+        setAdminMessage('No recording was captured.');
+        return;
+      }
+
+      const replayLessonId = await uploadLectureRecording(recordedFile, recordingContext);
+      await EduService.updateLiveClass(selectedLiveClass?._id || '', {
+        replayAvailable: Boolean(replayLessonId),
+        replayCourseId: recordingContext?.courseId || selectedLiveClass?.courseId || null,
+        replayLessonId,
+        recordingUrl: null,
+      });
+      await onRefresh();
+      setAdminMessage('Recording saved under the selected topic.');
+    } catch (error) {
+      setAdminMessage(error instanceof Error ? error.message : 'Unable to save recording.');
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  useEffect(() => () => {
+    if (mediaRecorderRef.current?.state && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    stopRecordingTracks();
+  }, []);
+
   return (
     <div className="grid gap-6 xl:grid-cols-[0.8fr_1.2fr]">
       <section className="rounded-[30px] border border-white/70 bg-white/92 p-6 shadow-[0_20px_60px_rgba(15,23,42,0.07)]">
@@ -1135,7 +1701,7 @@ const LiveTab = ({ overview }: { overview: PlatformOverview }) => {
           {overview.liveClasses.map((liveClass) => (
             <button
               key={liveClass._id}
-              onClick={() => setSelectedLiveClassId(liveClass._id)}
+              onClick={() => void handleLiveClassSelection(liveClass._id)}
               className={cn(
                 'w-full rounded-[26px] border p-4 text-left transition',
                 selectedLiveClass?._id === liveClass._id
@@ -1146,15 +1712,15 @@ const LiveTab = ({ overview }: { overview: PlatformOverview }) => {
               <div className="flex items-center justify-between gap-3">
                 <span className={cn(
                   'rounded-full px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em]',
-                  liveClass.mode === 'live' ? 'bg-[var(--danger-soft)] text-[var(--danger)]' : 'bg-white text-[var(--accent-rust)]',
+                  (liveClass.status || liveClass.mode) === 'live' ? 'bg-[var(--danger-soft)] text-[var(--danger)]' : 'bg-white text-[var(--accent-rust)]',
                 )}>
-                  {liveClass.mode}
+                  {liveClass.status || liveClass.mode}
                 </span>
                 <span className="text-sm text-[var(--ink-soft)]">{liveClass.provider}</span>
               </div>
               <h3 className="mt-4 text-lg font-semibold text-[var(--ink)]">{liveClass.title}</h3>
               <p className="mt-2 text-sm text-[var(--ink-soft)]">{liveClass.instructor}</p>
-              <p className="mt-3 text-sm text-[var(--ink-soft)]">{formatDateTime(liveClass.startTime)} • {liveClass.attendees} learners</p>
+              <p className="mt-3 text-sm text-[var(--ink-soft)]">{formatDateTime(liveClass.startTime)} • {liveClass.attendees}/{liveClass.maxAttendees || 1000} learners</p>
             </button>
           ))}
         </div>
@@ -1170,26 +1736,18 @@ const LiveTab = ({ overview }: { overview: PlatformOverview }) => {
                   <h3 className="mt-2 text-3xl font-semibold text-[var(--ink)]">{selectedLiveClass.title}</h3>
                   <p className="mt-3 text-sm leading-7 text-[var(--ink-soft)]">
                     {selectedLiveClass.mode === 'live'
-                      ? 'Join the live room for real-time explanation, doubt solving, and chat.'
-                      : 'Replay is stored so learners can revisit the session later with the same topic context.'}
+                      ? 'Attend the class inside EduMaster with protected playback, chat, and replay handoff.'
+                      : 'Replay stays available inside the platform so learners can revisit the session later.'}
                   </p>
                 </div>
-                <div className="flex flex-wrap gap-3">
-                  {selectedLiveClass.roomUrl && selectedLiveClass.mode === 'live' && (
-                    <a href={selectedLiveClass.roomUrl} target="_blank" rel="noreferrer" className="rounded-2xl bg-[var(--accent-rust)] px-5 py-3 font-semibold text-white">
-                      Join live room
-                    </a>
-                  )}
-                  {selectedLiveClass.recordingUrl && (
-                    <a href={selectedLiveClass.recordingUrl} target="_blank" rel="noreferrer" className="rounded-2xl border border-[var(--line)] px-5 py-3 font-semibold text-[var(--ink)]">
-                      Open replay
-                    </a>
-                  )}
+                <div className="flex flex-wrap gap-3 text-sm text-[var(--ink-soft)]">
+                  <span>Capacity target: {selectedLiveClass.maxAttendees || 1000}</span>
+                  <span>Enrollment: {selectedLiveClass.requiresEnrollment === false ? 'Open to logged-in users' : 'Protected'}</span>
                 </div>
               </div>
 
               <div className="mt-6 grid gap-4 md:grid-cols-3">
-                <MetricCard title="Format" value={selectedLiveClass.mode} hint="Live plus replay-ready delivery" icon={Radio} />
+                <MetricCard title="Format" value={selectedLiveClass.livePlaybackType || selectedLiveClass.mode} hint="Protected in-app delivery" icon={Radio} />
                 <MetricCard title="Chat" value={selectedLiveClass.chatEnabled ? 'On' : 'Off'} hint="Real-time class discussion" icon={MessageSquare} />
                 <MetricCard title="Recordings" value={selectedLiveClass.replayAvailable ? 'Stored' : 'None'} hint="Replay available after class ends" icon={Video} />
               </div>
@@ -1198,6 +1756,126 @@ const LiveTab = ({ overview }: { overview: PlatformOverview }) => {
                 {selectedLiveClass.topicTags.map((tag) => (
                   <span key={tag} className="rounded-full bg-[var(--accent-cream)] px-3 py-2 text-xs text-[var(--ink)]">{tag}</span>
                 ))}
+              </div>
+
+              {user?.role === 'admin' && (
+                <div className="mt-6 rounded-[24px] border border-[var(--line)] bg-[var(--accent-cream)] p-4">
+                  <div className="mb-4 grid gap-3 md:grid-cols-3">
+                    <select
+                      value={adminCourseId}
+                      onChange={(event) => {
+                        setAdminCourseId(event.target.value);
+                        setAdminModuleId('');
+                        setAdminChapterId('');
+                      }}
+                      disabled={adminBusy || recordingState !== 'idle'}
+                      className="rounded-2xl border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--ink)] outline-none"
+                    >
+                      <option value="">Choose course</option>
+                      {overview.courses.map((course) => (
+                        <option key={course._id} value={course._id}>{course.title}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={adminModuleId}
+                      onChange={(event) => {
+                        setAdminModuleId(event.target.value);
+                        setAdminChapterId('');
+                      }}
+                      disabled={!adminSelectedCourse || adminBusy || recordingState !== 'idle'}
+                      className="rounded-2xl border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--ink)] outline-none disabled:opacity-60"
+                    >
+                      <option value="">Choose subject</option>
+                      {(adminSelectedCourse?.modules || []).map((module) => (
+                        <option key={module.id} value={module.id}>{module.title}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={adminChapterId}
+                      onChange={(event) => setAdminChapterId(event.target.value)}
+                      disabled={!adminSelectedModule || adminBusy || recordingState !== 'idle'}
+                      className="rounded-2xl border border-[var(--line)] bg-white px-4 py-3 text-sm text-[var(--ink)] outline-none disabled:opacity-60"
+                    >
+                      <option value="">Choose topic (optional)</option>
+                      {(adminSelectedModule?.chapters || []).map((chapter) => (
+                        <option key={chapter.id} value={chapter.id}>{chapter.title}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="mb-4 rounded-2xl bg-white px-4 py-3 text-sm text-[var(--ink-soft)]">
+                    Live path:
+                    {' '}
+                    {[adminSelectedCourse?.title, adminSelectedModule?.title, adminSelectedModule?.chapters?.find((chapter) => chapter.id === adminChapterId)?.title]
+                      .filter(Boolean)
+                      .join(' > ') || 'Choose course and subject before starting live.'}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      onClick={() => void adminStartLive()}
+                      disabled={adminBusy || (selectedLiveClass.status || '').toLowerCase() === 'live'}
+                      className="rounded-2xl bg-[var(--accent-rust)] px-5 py-3 font-semibold text-white disabled:opacity-60"
+                    >
+                      {adminBusy ? 'Working...' : 'Start Live Now'}
+                    </button>
+                    <button
+                      onClick={() => void adminEndLive()}
+                      disabled={adminBusy || (selectedLiveClass.status || '').toLowerCase() !== 'live'}
+                      className="rounded-2xl border border-[var(--line)] bg-white px-5 py-3 font-semibold text-[var(--ink)] disabled:opacity-60"
+                    >
+                      End Live
+                    </button>
+                    <button
+                      onClick={() => void adminStartRecordingOnly()}
+                      disabled={adminBusy || recordingState === 'recording'}
+                      className="rounded-2xl border border-[var(--line)] bg-white px-5 py-3 font-semibold text-[var(--ink)] disabled:opacity-60"
+                    >
+                      {recordingState === 'recording' ? 'Recording On' : 'Start Recording'}
+                    </button>
+                    <button
+                      onClick={() => void adminStopRecordingOnly()}
+                      disabled={adminBusy || recordingState !== 'recording'}
+                      className="rounded-2xl border border-[var(--line)] bg-white px-5 py-3 font-semibold text-[var(--ink)] disabled:opacity-60"
+                    >
+                      Stop Recording
+                    </button>
+                    <span className="text-sm text-[var(--ink-soft)]">
+                      Admin controls are available directly in the live-class screen. Recording is saved into the mapped course path.
+                    </span>
+                  </div>
+                  {adminMessage && (
+                    <div className="mt-3 rounded-2xl bg-white px-4 py-3 text-sm text-[var(--ink)]">
+                      {adminMessage}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="mt-6">
+                {!user ? (
+                  <div className="rounded-[24px] border border-dashed border-[var(--line)] p-6 text-sm text-[var(--ink-soft)]">
+                    Log in to join the protected live class inside the app.
+                  </div>
+                ) : accessBusy ? (
+                  <div className="flex items-center gap-3 rounded-[24px] border border-[var(--line)] p-6 text-sm text-[var(--ink-soft)]">
+                    <LoaderCircle className="h-5 w-5 animate-spin" />
+                    Preparing secure live access…
+                  </div>
+                ) : access ? (
+                  <div className="space-y-4">
+                    {(access.accessType === 'webrtc-live' || access.accessType === 'livekit-room') && selectedLiveClass ? (
+                      <LiveBroadcastViewer liveClassId={selectedLiveClass._id} access={access} />
+                    ) : (
+                      <ProtectedLivePlayback access={access} />
+                    )}
+                    <div className="rounded-[24px] bg-[var(--accent-cream)] p-4 text-sm text-[var(--ink-soft)]">
+                      {access.statusMessage}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-[24px] border border-dashed border-[var(--line)] p-6 text-sm text-[var(--ink-soft)]">
+                    Secure access could not be prepared right now.
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1768,6 +2446,7 @@ const AdminTab = ({ overview, onRefresh }: { overview: PlatformOverview; onRefre
       </div>
 
       <AdminCourseManager courses={overview.courses || []} onCoursesChanged={onRefresh} />
+      <AdminLiveClassManager courses={overview.courses || []} onChanged={onRefresh} />
       <AdminVideoUpload courses={overview.courses || []} onVideoUploaded={onRefresh} />
       <AdminModuleManager courses={overview.courses || []} onModulesChanged={onRefresh} />
 
@@ -1833,13 +2512,19 @@ const AppContent = () => {
   const [activeTab, setActiveTab] = useState<TabKey>('overview');
   const [loadingOverview, setLoadingOverview] = useState(true);
   const [resumeTarget, setResumeTarget] = useState<{ courseId: string; lessonId?: string | null } | null>(null);
+  const [liveNavigationTarget, setLiveNavigationTarget] = useState<string | null>(null);
+  const [savedTopicIds, setSavedTopicIds] = useState<string[]>([]);
+  const seedAttemptedRef = useRef(false);
 
   const refreshOverview = async (background = true) => {
     if (!background) {
       setLoadingOverview(true);
     }
     try {
-      await EduService.seedPlatform();
+      if (!seedAttemptedRef.current) {
+        await EduService.seedPlatform();
+        seedAttemptedRef.current = true;
+      }
       const nextPublicOverview = await EduService.getPlatformOverview();
       setPublicOverview(nextPublicOverview);
 
@@ -1859,6 +2544,117 @@ const AppContent = () => {
   useEffect(() => {
     void refreshOverview(false);
   }, [user]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const tab = params.get('tab');
+    const liveClassId = params.get('liveClassId');
+
+    if (tab === 'live') {
+      setActiveTab('live');
+    }
+
+    if (liveClassId) {
+      setLiveNavigationTarget(liveClassId);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!user || typeof window === 'undefined') {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshOverview(true);
+    }, 20000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [user]);
+
+  useEffect(() => {
+    if (!user?._id || typeof window === 'undefined') {
+      setSavedTopicIds([]);
+      return;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(buildSavedTopicsKey(user._id));
+      const parsed = raw ? JSON.parse(raw) as string[] : [];
+      setSavedTopicIds(Array.isArray(parsed) ? parsed : []);
+    } catch {
+      setSavedTopicIds([]);
+    }
+  }, [user?._id]);
+
+  const savedTopics = useMemo(() => {
+    if (!overview || !savedTopicIds.length) {
+      return [];
+    }
+
+    const savedTopicSet = new Set(savedTopicIds);
+    return overview.courses.flatMap((course) =>
+      flattenCourseLessons(course)
+        .filter((entry) => savedTopicSet.has(`${course._id}:${entry.lesson.id}`))
+        .map((entry) => {
+          const progress = (course.lessonProgress || []).find((item) => item.lessonId === entry.lesson.id);
+          return {
+            courseId: course._id,
+            lessonId: entry.lesson.id,
+            savedAt: '',
+            courseTitle: course.title,
+            lessonTitle: entry.lesson.title,
+            exam: course.exam,
+            thumbnailUrl: course.thumbnailUrl,
+            moduleTitle: entry.moduleTitle,
+            chapterTitle: entry.chapterTitle,
+            progressSeconds: progress?.progressSeconds || 0,
+            completed: progress?.completed || false,
+          } as SavedTopic;
+        }))
+      .sort((left, right) => savedTopicIds.indexOf(`${left.courseId}:${left.lessonId}`) - savedTopicIds.indexOf(`${right.courseId}:${right.lessonId}`));
+  }, [overview, savedTopicIds]);
+
+  const toggleSavedTopic = (courseId: string, lessonId: string) => {
+    if (!user?._id || typeof window === 'undefined') {
+      return;
+    }
+
+    setSavedTopicIds((current) => {
+      const topicKey = `${courseId}:${lessonId}`;
+      const next = current.includes(topicKey)
+        ? current.filter((item) => item !== topicKey)
+        : [topicKey, ...current];
+      window.localStorage.setItem(buildSavedTopicsKey(user._id), JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const openNotification = (notification: NotificationItem) => {
+    const target = getNotificationNavigationTarget(notification);
+
+    if (target?.tab === 'live' && target.liveClassId) {
+      setActiveTab('live');
+      setLiveNavigationTarget(target.liveClassId);
+
+      if (typeof window !== 'undefined') {
+        const url = new URL(window.location.href);
+        url.searchParams.set('tab', 'live');
+        url.searchParams.set('liveClassId', target.liveClassId);
+        window.history.replaceState({}, '', `${url.pathname}?${url.searchParams.toString()}`);
+      }
+      return;
+    }
+
+    if (notification.actionUrl && typeof window !== 'undefined') {
+      window.location.href = notification.actionUrl;
+    }
+  };
 
   if (loading || loadingOverview) {
     return (
@@ -1883,8 +2679,13 @@ const AppContent = () => {
       onLogout={logout}
       onRefresh={() => refreshOverview(true)}
       resumeTarget={resumeTarget}
+      liveNavigationTarget={liveNavigationTarget}
       onContinueLearningNavigate={(courseId, lessonId) => setResumeTarget({ courseId, lessonId })}
+      onOpenNotification={openNotification}
       onResumeNavigationHandled={() => setResumeTarget(null)}
+      savedTopicIds={savedTopicIds}
+      savedTopics={savedTopics}
+      onToggleSavedTopic={toggleSavedTopic}
     />
   );
 };

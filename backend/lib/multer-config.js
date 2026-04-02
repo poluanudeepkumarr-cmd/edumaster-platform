@@ -2,6 +2,7 @@
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const { appConfig } = require('./config.js');
 
 const uploadDir = path.join(__dirname, '../../uploads/videos');
 
@@ -22,13 +23,22 @@ const storage = multer.diskStorage({
   },
 });
 
+const allowedMimes = [
+  'video/mp4',
+  'video/webm',
+  'video/ogg',
+  'video/quicktime',
+  'video/x-matroska',
+  'application/x-matroska',
+];
+const allowedExtensions = new Set(['.mp4', '.webm', '.ogg', '.mov', '.mkv']);
+
 const fileFilter = (req, file, cb) => {
-  // Accept video files only
-  const allowedMimes = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'];
-  if (allowedMimes.includes(file.mimetype)) {
+  const extension = path.extname(file.originalname || '').toLowerCase();
+  if (allowedMimes.includes(file.mimetype) || allowedExtensions.has(extension)) {
     cb(null, true);
   } else {
-    cb(new Error(`Invalid file type. Allowed: ${allowedMimes.join(', ')}`), false);
+    cb(new Error('Invalid file type. Allowed: MP4, WebM, OGG, MOV, MKV'), false);
   }
 };
 
@@ -36,7 +46,7 @@ const upload = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: 500 * 1024 * 1024, // 500MB
+    fileSize: appConfig.maxVideoUploadMb * 1024 * 1024,
   },
 });
 

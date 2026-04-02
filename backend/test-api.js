@@ -45,8 +45,6 @@ const testEndpoints = async () => {
   }
 
   const studentEmail = `student_${now}@example.com`;
-  const adminEmail = `admin_${now}@example.com`;
-
   try {
     const health = await runStep('GET /health', () => request('GET', '/health'));
     await runStep('GET /ready', () => request('GET', '/ready'));
@@ -61,14 +59,24 @@ const testEndpoints = async () => {
       }),
     );
 
-    await runStep('POST /auth/register admin', () =>
-      request('POST', '/auth/register', {
-        email: adminEmail,
-        password: 'test12345',
-        name: 'Admin Tester',
-        role: 'admin',
-      }),
-    );
+    await runStep('POST /auth/register admin is rejected', async () => {
+      try {
+        await request('POST', '/auth/register', {
+          email: `admin_${now}@example.com`,
+          password: 'test12345',
+          name: 'Admin Tester',
+          role: 'admin',
+        });
+      } catch (error) {
+        if (error?.status === 409) {
+          throw error;
+        }
+
+        return error.payload;
+      }
+
+      throw new Error('Admin self-registration should not succeed');
+    });
 
     const studentLogin = await runStep('POST /auth/login', () =>
       request('POST', '/auth/login', {
@@ -77,10 +85,11 @@ const testEndpoints = async () => {
         device: 'terminal-smoke-test',
       }),
     );
+    const publicOverview = await runStep('GET /platform/overview public', () => request('GET', '/platform/overview'));
     const adminLogin = await runStep('POST /auth/login admin', () =>
       request('POST', '/auth/login', {
-        email: adminEmail,
-        password: 'test12345',
+        email: publicOverview.sampleCredentials.adminEmail,
+        password: publicOverview.sampleCredentials.adminPassword,
         device: 'terminal-admin-smoke-test',
       }),
     );
@@ -90,13 +99,32 @@ const testEndpoints = async () => {
     const studentUserId = registeredStudent.user._id;
     await runStep('GET /auth/session', () => request('GET', '/auth/session', null, studentToken));
 
-    await runStep('GET /platform/overview public', () => request('GET', '/platform/overview'));
     await runStep('GET /platform/overview student', () => request('GET', '/platform/overview', null, studentToken));
     const liveClasses = await runStep('GET /live-classes', () => request('GET', '/live-classes'));
     await runStep(`GET /live-classes/${liveClasses[0]._id}`, () => request('GET', `/live-classes/${liveClasses[0]._id}`));
-    await runStep(`GET /live-classes/${liveClasses[0]._id}/chat`, () => request('GET', `/live-classes/${liveClasses[0]._id}/chat`));
-    await runStep(`POST /live-classes/${liveClasses[0]._id}/chat`, () =>
-      request('POST', `/live-classes/${liveClasses[0]._id}/chat`, {
+    const liveClass = await runStep('POST /live-classes admin create', () =>
+      request('POST', '/live-classes', {
+        title: 'Smoke Test Live Class',
+        instructor: 'Terminal Faculty',
+        startTime: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        durationMinutes: 60,
+        provider: 'EduMaster Live',
+        mode: 'live',
+        status: 'scheduled',
+        livePlaybackType: 'hls',
+        livePlaybackUrl: '',
+        chatEnabled: true,
+        doubtSolving: true,
+        replayAvailable: true,
+        maxAttendees: 1000,
+        requiresEnrollment: false,
+        topicTags: ['Smoke Test', 'Live'],
+      }, adminToken),
+    );
+    await runStep(`GET /live-classes/${liveClass._id}/access`, () => request('GET', `/live-classes/${liveClass._id}/access`, null, studentToken));
+    await runStep(`GET /live-classes/${liveClass._id}/chat`, () => request('GET', `/live-classes/${liveClass._id}/chat`, null, studentToken));
+    await runStep(`POST /live-classes/${liveClass._id}/chat`, () =>
+      request('POST', `/live-classes/${liveClass._id}/chat`, {
         message: 'Smoke test live class doubt',
         kind: 'doubt',
       }, studentToken),

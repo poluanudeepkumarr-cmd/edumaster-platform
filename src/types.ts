@@ -18,12 +18,21 @@ export interface AuthResponse {
 export interface CourseLesson {
   id: string;
   title: string;
-  type: 'youtube' | 'premium' | 'pdf' | 'video' | string;
+  type: 'youtube' | 'premium' | 'pdf' | 'video' | 'private-video' | string;
   durationMinutes: number;
   videoUrl?: string;
   notesUrl?: string;
   premium?: boolean;
   locked?: boolean;
+  requiresSecurePlayback?: boolean;
+  sequentialLocked?: boolean;
+  sequentialUnlockReason?: string | null;
+  deliveryProfile?: string | null;
+  deliveryStrategy?: 'source' | 'hls' | string | null;
+  hlsProcessingStatus?: 'queued' | 'processing' | 'ready' | 'failed' | string | null;
+  hlsProcessingError?: string | null;
+  sourceFallbackAllowed?: boolean;
+  targetQualities?: string[];
 }
 
 export interface CourseChapter {
@@ -69,6 +78,22 @@ export interface CourseCard {
     completed: boolean;
     updatedAt: string;
   }[];
+}
+
+export interface ProtectedLessonPlayback {
+  playerType: 'youtube' | 'private-video';
+  embedUrl: string | null;
+  streamUrl: string | null;
+  streamFormat?: 'source' | 'hls' | string | null;
+  playbackStatus?: 'queued' | 'processing' | 'ready' | 'failed' | string | null;
+  deliveryProfile?: string | null;
+  availableQualities?: string[];
+  statusMessage?: string | null;
+  watermarkText: string;
+  resumeSeconds: number;
+  completed: boolean;
+  tokenExpiresAt: string | null;
+  drmEnabled: boolean;
 }
 
 export interface MockQuestion {
@@ -160,19 +185,91 @@ export interface DailyQuizState {
 
 export interface LiveClass {
   _id: string;
+  courseId?: string | null;
+  moduleId?: string | null;
+  moduleTitle?: string | null;
+  chapterId?: string | null;
+  chapterTitle?: string | null;
   title: string;
   instructor: string;
   startTime: string;
   durationMinutes: number;
   provider: string;
   mode: 'live' | 'replay' | string;
+  status?: 'scheduled' | 'live' | 'ended' | 'cancelled' | string;
+  livePlaybackUrl?: string | null;
+  livePlaybackType?: 'hls' | 'iframe' | 'source' | 'webrtc' | 'livekit' | string | null;
+  embedUrl?: string | null;
   roomUrl?: string | null;
   recordingUrl?: string | null;
+  replayCourseId?: string | null;
+  replayLessonId?: string | null;
   chatEnabled: boolean;
   doubtSolving: boolean;
   replayAvailable: boolean;
   attendees: number;
+  maxAttendees?: number;
+  requiresEnrollment?: boolean;
+  joinEnabled?: boolean;
+  replayReady?: boolean;
   topicTags: string[];
+}
+
+export interface LiveClassAccess {
+  liveClassId: string;
+  title: string;
+  provider: string;
+  mode: string;
+  status: string;
+  accessType: 'live-stream' | 'embedded-room' | 'replay-lesson' | 'recording-link' | 'webrtc-live' | 'livekit-room' | 'upcoming' | string;
+  streamUrl: string | null;
+  streamFormat: 'hls' | 'source' | string | null;
+  embedUrl: string | null;
+  roomUrl: string | null;
+  liveRoomName?: string | null;
+  liveKitUrl?: string | null;
+  replayPlayback: ProtectedLessonPlayback | null;
+  replayExternalUrl: string | null;
+  replayCourseId: string | null;
+  replayLessonId: string | null;
+  tokenExpiresAt: string | null;
+  watermarkText: string | null;
+  statusMessage: string;
+}
+
+export interface LiveBroadcastSignal {
+  id: string;
+  type?: string;
+  sdp?: string;
+  candidate?: string;
+  sdpMid?: string | null;
+  sdpMLineIndex?: number | null;
+  usernameFragment?: string | null;
+  createdAt: string;
+}
+
+export interface LiveBroadcastViewerState {
+  viewerId: string;
+  offer: LiveBroadcastSignal | null;
+  answer: LiveBroadcastSignal | null;
+  adminCandidates: LiveBroadcastSignal[];
+  status: string;
+  lastSeenAt: string | null;
+}
+
+export interface LiveBroadcastAdminState {
+  liveClassId: string;
+  status: string;
+  viewers: Array<{
+    viewerId: string;
+    userId: string;
+    createdAt: string;
+    offer: LiveBroadcastSignal | null;
+    answer: LiveBroadcastSignal | null;
+    adminCandidates: LiveBroadcastSignal[];
+    viewerCandidates: LiveBroadcastSignal[];
+    lastSeenAt: string | null;
+  }>;
 }
 
 export interface LiveChatMessage {
@@ -201,6 +298,10 @@ export interface NotificationItem {
   title: string;
   message: string;
   type: string;
+  entityId?: string | null;
+  actionUrl?: string | null;
+  actionLabel?: string | null;
+  payload?: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -306,6 +407,20 @@ export interface PlatformOverview {
     studentEmail: string;
     studentPassword: string;
   };
+}
+
+export interface SavedTopic {
+  courseId: string;
+  lessonId: string;
+  savedAt: string;
+  courseTitle: string;
+  lessonTitle: string;
+  exam: string;
+  thumbnailUrl: string;
+  moduleTitle?: string | null;
+  chapterTitle?: string | null;
+  progressSeconds?: number;
+  completed?: boolean;
 }
 
 export interface AiResponse {

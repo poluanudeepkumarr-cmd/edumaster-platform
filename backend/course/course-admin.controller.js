@@ -16,6 +16,46 @@ const getFlattenedLessons = (course) =>
     ...((Array.isArray(module.chapters) ? module.chapters : []).flatMap((chapter) =>
       (Array.isArray(chapter.lessons) ? chapter.lessons : []))),
   ]);
+const isLocalUploadPath = (value) => typeof value === 'string' && value.startsWith('/uploads/videos/');
+const { deleteStoredPrivateVideo } = require('../lib/private-video-storage.js');
+const { deleteProcessedHlsAssets } = require('../lib/video-processing.js');
+
+const cleanupLessons = async (lessons = []) => {
+  const fs = require('fs');
+  const path = require('path');
+
+  await Promise.all((Array.isArray(lessons) ? lessons : []).map(async (lesson) => {
+    if (isLocalUploadPath(lesson.videoUrl)) {
+      try {
+        const videoPath = path.join(__dirname, '../../', lesson.videoUrl);
+        if (fs.existsSync(videoPath)) {
+          fs.unlinkSync(videoPath);
+        }
+      } catch (err) {
+        console.error(`Failed to delete video file: ${lesson.videoUrl}`, err);
+      }
+    }
+
+    if (lesson.storagePath) {
+      try {
+        await deleteStoredPrivateVideo({
+          storageProvider: lesson.storageProvider,
+          storagePath: lesson.storagePath,
+        });
+      } catch (err) {
+        console.error(`Failed to delete private video file: ${lesson.storagePath}`, err);
+      }
+    }
+
+    if (lesson.hlsManifestPath) {
+      try {
+        await deleteProcessedHlsAssets(lesson.hlsManifestPath);
+      } catch (err) {
+        console.error(`Failed to delete processed HLS assets: ${lesson.hlsManifestPath}`, err);
+      }
+    }
+  }));
+};
 
 const loadCourseOrThrow = async (courseId) => {
   const course = await coursesRepository.findById(courseId);
@@ -85,6 +125,16 @@ const deleteCourse = asyncHandler(async (req, res) => {
   if (fs.existsSync(courseVideosPath)) {
     fs.rmSync(courseVideosPath, { recursive: true, force: true });
   }
+
+  const privateVideoDeletes = getFlattenedLessons(course)
+    .filter((lesson) => Boolean(lesson.storagePath))
+    .map((lesson) => deleteStoredPrivateVideo({
+      storageProvider: lesson.storageProvider,
+      storagePath: lesson.storagePath,
+    }).catch((err) => {
+      console.error(`Failed to delete private video file: ${lesson.storagePath}`, err);
+    }));
+  await Promise.all(privateVideoDeletes);
 
   await coursesRepository.delete(id);
 
@@ -215,6 +265,7 @@ const deleteChapter = asyncHandler(async (req, res) => {
     throw new ApiError(404, 'Chapter not found', { code: 'CHAPTER_NOT_FOUND' });
   }
 
+  await cleanupLessons(module.chapters[chapterIndex]?.lessons || []);
   module.chapters.splice(chapterIndex, 1);
   course.updated_at = new Date().toISOString();
   const updatedCourse = await coursesRepository.updateCourseModule(courseId, course);
@@ -237,23 +288,8 @@ const deleteModule = asyncHandler(async (req, res) => {
   }
 
   const deletedModule = course.modules[moduleIndex];
-  if (deletedModule.lessons && Array.isArray(deletedModule.lessons)) {
-    const fs = require('fs');
-    const path = require('path');
-
-    deletedModule.lessons.forEach((lesson) => {
-      if (lesson.videoUrl) {
-        try {
-          const videoPath = path.join(__dirname, '../../', lesson.videoUrl);
-          if (fs.existsSync(videoPath)) {
-            fs.unlinkSync(videoPath);
-          }
-        } catch (err) {
-          console.error(`Failed to delete video file: ${lesson.videoUrl}`, err);
-        }
-      }
-    });
-  }
+  await cleanupLessons(deletedModule.lessons || []);
+  await Promise.all((deletedModule.chapters || []).map((chapter) => cleanupLessons(chapter.lessons || [])));
 
   course.modules.splice(moduleIndex, 1);
   course.updated_at = new Date().toISOString();

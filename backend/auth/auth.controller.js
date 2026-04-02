@@ -18,7 +18,14 @@ const register = asyncHandler(async (req, res) => {
   const name = requireString(req.body?.name, 'name', { maxLength: 80 });
   const email = requireString(req.body?.email, 'email', { maxLength: 160 }).toLowerCase();
   const password = validatePassword(req.body?.password);
-  const role = req.body?.role === 'admin' ? 'admin' : 'student';
+
+  if (req.body?.role && req.body.role !== 'student') {
+    throw new ApiError(403, 'Self-service registration can only create student accounts', {
+      code: 'ROLE_NOT_ALLOWED',
+    });
+  }
+
+  const role = 'student';
 
   const existing = await usersRepository.findByEmail(email);
   if (existing) {

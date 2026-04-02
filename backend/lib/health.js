@@ -26,11 +26,15 @@ const getDependencyHealth = async () => {
     postgres,
     redis,
     storage: {
-      enabled: Boolean(appConfig.storageBucket && appConfig.storageRegion),
-      status: appConfig.storageBucket && appConfig.storageRegion ? 'configured' : 'disabled',
+      enabled: appConfig.privateVideoStorageProvider === 's3'
+        ? Boolean(appConfig.storageBucket && appConfig.storageRegion && appConfig.s3AccessKeyId && appConfig.s3SecretAccessKey)
+        : true,
+      status: appConfig.privateVideoStorageProvider === 's3'
+        ? appConfig.storageBucket && appConfig.storageRegion && appConfig.s3AccessKeyId && appConfig.s3SecretAccessKey ? 'configured' : 'down'
+        : 'configured',
       detail: appConfig.storageBucket
-        ? `${appConfig.storageBucket} (${appConfig.storageRegion || 'region-missing'})`
-        : 'S3 bucket not configured',
+        ? `${appConfig.privateVideoStorageProvider}:${appConfig.storageBucket} (${appConfig.storageRegion || 'region-missing'})`
+        : `storage-provider:${appConfig.privateVideoStorageProvider}`,
     },
     payments: {
       enabled: Boolean(appConfig.stripeSecretKey && appConfig.stripePublishableKey),

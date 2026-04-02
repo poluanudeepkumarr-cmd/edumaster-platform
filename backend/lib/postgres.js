@@ -151,22 +151,46 @@ const schemaStatements = [
     CREATE TABLE IF NOT EXISTS live_classes (
       id TEXT PRIMARY KEY,
       course_id TEXT REFERENCES courses(id) ON DELETE SET NULL,
+      module_id TEXT,
+      module_title VARCHAR(160),
+      chapter_id TEXT,
+      chapter_title VARCHAR(160),
       title VARCHAR(255) NOT NULL,
       instructor_name VARCHAR(120),
       scheduled_start_at TIMESTAMPTZ NOT NULL,
       duration_minutes INT NOT NULL DEFAULT 60,
       provider VARCHAR(40) NOT NULL DEFAULT 'Zoom',
       mode VARCHAR(20) NOT NULL DEFAULT 'live',
+      status VARCHAR(20) NOT NULL DEFAULT 'scheduled',
+      live_playback_url TEXT,
+      live_playback_type VARCHAR(20) NOT NULL DEFAULT 'hls',
+      embed_url TEXT,
       room_url TEXT,
       recording_url TEXT,
+      replay_course_id TEXT REFERENCES courses(id) ON DELETE SET NULL,
+      replay_lesson_id TEXT,
       chat_enabled BOOLEAN NOT NULL DEFAULT TRUE,
       doubt_solving BOOLEAN NOT NULL DEFAULT TRUE,
       replay_available BOOLEAN NOT NULL DEFAULT TRUE,
       attendee_count INT NOT NULL DEFAULT 0,
+      max_attendees INT NOT NULL DEFAULT 1000,
+      requires_enrollment BOOLEAN NOT NULL DEFAULT TRUE,
       topic_tags JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `,
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT \'scheduled\'',
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS live_playback_url TEXT',
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS live_playback_type VARCHAR(20) NOT NULL DEFAULT \'hls\'',
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS embed_url TEXT',
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS replay_course_id TEXT',
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS replay_lesson_id TEXT',
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS max_attendees INT NOT NULL DEFAULT 1000',
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS requires_enrollment BOOLEAN NOT NULL DEFAULT TRUE',
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS module_id TEXT',
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS module_title VARCHAR(160)',
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS chapter_id TEXT',
+  'ALTER TABLE live_classes ADD COLUMN IF NOT EXISTS chapter_title VARCHAR(160)',
   `
     CREATE TABLE IF NOT EXISTS live_chat_messages (
       id TEXT PRIMARY KEY,
@@ -208,10 +232,18 @@ const schemaStatements = [
       title VARCHAR(255) NOT NULL,
       message TEXT NOT NULL,
       notification_type VARCHAR(40) NOT NULL DEFAULT 'general',
+      entity_id TEXT,
+      action_url TEXT,
+      action_label VARCHAR(80),
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
       is_read BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `,
+  'ALTER TABLE notifications ADD COLUMN IF NOT EXISTS entity_id TEXT',
+  'ALTER TABLE notifications ADD COLUMN IF NOT EXISTS action_url TEXT',
+  'ALTER TABLE notifications ADD COLUMN IF NOT EXISTS action_label VARCHAR(80)',
+  'ALTER TABLE notifications ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT \'{}\'::jsonb',
   `
     CREATE TABLE IF NOT EXISTS referrals (
       id TEXT PRIMARY KEY,
@@ -322,8 +354,10 @@ const initializePostgres = async () => {
 
   if (!postgresInitPromise) {
     postgresInitPromise = (async () => {
-      const client = await currentPool.connect();
+      let client;
+
       try {
+        client = await currentPool.connect();
         for (const statement of schemaStatements) {
           await client.query(statement);
         }
@@ -342,7 +376,7 @@ const initializePostgres = async () => {
           reason: error.message,
         };
       } finally {
-        client.release();
+        client?.release();
       }
     })();
   }

@@ -1,5 +1,5 @@
 const express = require('express');
-const { getCourses, getCourse, getCourseLessons, createCourse } = require('./course.controller.js');
+const { getCourses, getCourse, getCourseLessons, getProtectedLessonPlayer, streamProtectedLesson, createCourse } = require('./course.controller.js');
 const {
   uploadVideoToModule,
   deleteVideoFromModule,
@@ -46,6 +46,8 @@ router.get('/:courseId/modules/:moduleId/videos/:videoId', requireAuth, requireA
 
 // Public routes
 router.get('/', attachAuthIfPresent, getCourses);
+router.get('/stream/:token', streamProtectedLesson);
+router.get('/:id/lessons/:lessonId/player', requireAuth, getProtectedLessonPlayer);
 router.get('/:id/lessons', attachAuthIfPresent, getCourseLessons);
 router.get('/:id', attachAuthIfPresent, getCourse);
 

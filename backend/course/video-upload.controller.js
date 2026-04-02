@@ -11,17 +11,24 @@ const {
   optionalString,
   optionalNumber,
 } = require('../lib/http.js');
+const { appConfig } = require('../lib/config.js');
+const { storePrivateVideoUpload, deleteStoredPrivateVideo } = require('../lib/private-video-storage.js');
+const { createInitialVideoDeliveryState, scheduleVideoProcessing, deleteProcessedHlsAssets } = require('../lib/video-processing.js');
 
-const uploadPath = path.join(__dirname, '../../uploads/videos');
-
-// Ensure upload directory exists
-if (!fs.existsSync(uploadPath)) {
-  fs.mkdirSync(uploadPath, { recursive: true });
-}
+const validVideoTypes = [
+  'video/mp4',
+  'video/webm',
+  'video/ogg',
+  'video/quicktime',
+  'video/x-matroska',
+  'application/x-matroska',
+];
+const validVideoExtensions = new Set(['.mp4', '.webm', '.ogg', '.mov', '.mkv']);
+const maxSize = appConfig.maxVideoUploadMb * 1024 * 1024;
 
 const uploadVideoToModule = asyncHandler(async (req, res) => {
   const lessonTitle = requireString(req.body?.lessonTitle, 'lessonTitle', { maxLength: 160 });
-  const lessonType = optionalString(req.body?.lessonType, 'video', { maxLength: 40 });
+  const lessonType = optionalString(req.body?.lessonType, 'private-video', { maxLength: 40 });
   const durationMinutes = optionalNumber(req.body?.durationMinutes, 0, { min: 0, max: 5000 });
   const moduleName = optionalString(req.body?.moduleName, 'Untitled Module', { maxLength: 160 });
   const moduleDescription = optionalString(req.body?.moduleDescription, '', { maxLength: 1500 });
@@ -30,46 +37,61 @@ const uploadVideoToModule = asyncHandler(async (req, res) => {
   const chapterDescription = optionalString(req.body?.chapterDescription, '', { maxLength: 1500 });
   const courseId = requireString(req.params.courseId, 'courseId');
   const moduleId = requireString(req.params.moduleId, 'moduleId');
+  const originalFilename = optionalString(req.body?.originalFilename, '', { maxLength: 255 });
+  const fileSize = optionalNumber(req.body?.fileSize, 0, { min: 0, max: maxSize });
+  const mimeType = optionalString(req.body?.mimeType, '', { maxLength: 120 });
 
   if (!req.file) {
     throw new ApiError(400, 'No video file provided', { code: 'VIDEO_REQUIRED' });
   }
 
-  const validVideoTypes = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime'];
-  if (!validVideoTypes.includes(req.file.mimetype)) {
+  const fileExtension = path.extname(req.file.originalname || '').toLowerCase();
+  if (!validVideoTypes.includes(req.file.mimetype) && !validVideoExtensions.has(fileExtension)) {
     fs.unlinkSync(req.file.path);
-    throw new ApiError(400, 'Invalid video format. Supported: MP4, WebM, OGG, MOV', { code: 'INVALID_VIDEO_FORMAT' });
+    throw new ApiError(400, 'Invalid video format. Supported: MP4, WebM, OGG, MOV, MKV', { code: 'INVALID_VIDEO_FORMAT' });
   }
 
-  const maxSize = 500 * 1024 * 1024;
   if (req.file.size > maxSize) {
     fs.unlinkSync(req.file.path);
-    throw new ApiError(400, 'Video file too large. Max 500MB allowed', { code: 'VIDEO_TOO_LARGE' });
+    throw new ApiError(400, `Video file too large. Max ${appConfig.maxVideoUploadMb}MB allowed`, { code: 'VIDEO_TOO_LARGE' });
   }
 
-  const videoId = `video_${Date.now()}`;
-  const fileExt = path.extname(req.file.originalname);
-  const filename = `${videoId}${fileExt}`;
-  const finalPath = path.join(uploadPath, filename);
-  fs.renameSync(req.file.path, finalPath);
+  const lessonId = `video_${Date.now()}`;
+  const storedVideo = await storePrivateVideoUpload({
+    tempFilePath: req.file.path,
+    courseId,
+    moduleId,
+    lessonId,
+    originalName: req.file.originalname,
+    mimeType: req.file.mimetype,
+  });
 
   const videoMetadata = {
-    id: videoId,
+    id: lessonId,
     title: lessonTitle,
-    type: lessonType,
-    videoUrl: `/uploads/videos/${filename}`,
-    originalFilename: req.file.originalname,
-    fileSize: req.file.size,
-    mimeType: req.file.mimetype,
+    type: lessonType === 'video' ? 'private-video' : lessonType,
+    moduleId,
+    chapterId: chapterId || null,
+    videoUrl: null,
+    storagePath: storedVideo.storagePath,
+    storageProvider: storedVideo.storageProvider,
+    originalFilename: req.file.originalname || originalFilename || null,
+    fileSize: req.file.size || fileSize || 0,
+    mimeType: req.file.mimetype || mimeType || null,
     uploadedAt: new Date().toISOString(),
     uploadedBy: req.user?.id || 'admin',
     durationMinutes,
     premium: req.body?.isPremium === 'true' || req.body?.isPremium === true,
+    accessPolicy: storedVideo.accessPolicy,
+    ...createInitialVideoDeliveryState(),
   };
 
   const course = await coursesRepository.findById(courseId);
   if (!course) {
-    fs.unlinkSync(finalPath);
+    await deleteStoredPrivateVideo({
+      storageProvider: storedVideo.storageProvider,
+      storagePath: storedVideo.storagePath,
+    });
     throw new ApiError(404, 'Course not found', { code: 'COURSE_NOT_FOUND' });
   }
 
@@ -116,6 +138,7 @@ const uploadVideoToModule = asyncHandler(async (req, res) => {
   lessonContainer.lessons.push(videoMetadata);
   course.updated_at = new Date().toISOString();
   await coursesRepository.updateCourseModule(courseId, course);
+  scheduleVideoProcessing({ courseId, lessonId });
 
   return created(res, {
     message: 'Video uploaded successfully',
@@ -145,10 +168,11 @@ const deleteVideoFromModule = asyncHandler(async (req, res) => {
   }
 
   const video = targetModule.lessons[videoIndex];
-  const filePath = path.join(__dirname, '../../', video.videoUrl);
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-  }
+  await deleteStoredPrivateVideo({
+    storageProvider: video.storageProvider,
+    storagePath: video.storagePath,
+  });
+  await deleteProcessedHlsAssets(video.hlsManifestPath);
 
   targetModule.lessons.splice(videoIndex, 1);
   await coursesRepository.updateCourseModule(courseId, course);

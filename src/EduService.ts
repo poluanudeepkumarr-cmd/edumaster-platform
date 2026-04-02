@@ -5,9 +5,13 @@ import {
   CourseCard,
   DailyQuizResult,
   LiveChatMessage,
+  LiveBroadcastAdminState,
+  LiveBroadcastViewerState,
   LiveClass,
+  LiveClassAccess,
   MockTest,
   PlatformOverview,
+  ProtectedLessonPlayback,
   RegisterPayload,
   SubscriptionPlan,
   TestAttemptResult,
@@ -73,6 +77,14 @@ const extractErrorMessage = (payload: any, path: string) =>
   || payload?.details?.message
   || `Request failed for ${path}`;
 
+const handleUnauthorized = () => {
+  saveToken(null);
+
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('edumaster:auth-expired'));
+  }
+};
+
 const request = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -85,6 +97,10 @@ const request = async <T>(path: string, options: RequestInit = {}): Promise<T> =
   const payload = await parsePayload(response);
 
   if (!response.ok) {
+    if (response.status === 401) {
+      handleUnauthorized();
+      throw new Error('Session expired. Please sign in again.');
+    }
     throw new Error(extractErrorMessage(payload, path));
   }
 
@@ -103,6 +119,10 @@ const rootRequest = async <T>(path: string, options: RequestInit = {}): Promise<
   const payload = await parsePayload(response);
 
   if (!response.ok) {
+    if (response.status === 401) {
+      handleUnauthorized();
+      throw new Error('Session expired. Please sign in again.');
+    }
     throw new Error(extractErrorMessage(payload, path));
   }
 
@@ -391,14 +411,119 @@ export const EduService = {
     return request<LiveClass[]>(`/live-classes`);
   },
 
+  getAdminLiveClasses: async () => {
+    return request<LiveClass[]>(`/live-classes/admin/list`);
+  },
+
+  createLiveClass: async (payload: Partial<LiveClass>) => {
+    return request<LiveClass>('/live-classes', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  updateLiveClass: async (liveClassId: string, payload: Partial<LiveClass>) => {
+    return request<LiveClass>(`/live-classes/${liveClassId}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  startLiveClass: async (liveClassId: string) => {
+    return request<LiveClass>(`/live-classes/${liveClassId}/start`, {
+      method: 'POST',
+    });
+  },
+
+  endLiveClass: async (liveClassId: string, payload: Partial<LiveClass> = {}) => {
+    return request<LiveClass>(`/live-classes/${liveClassId}/end`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  deleteLiveClass: async (liveClassId: string) => {
+    return request<{ deleted: boolean; liveClassId: string }>(`/live-classes/${liveClassId}`, {
+      method: 'DELETE',
+    });
+  },
+
+  getLiveClassAccess: async (liveClassId: string) => {
+    return request<LiveClassAccess>(`/live-classes/${liveClassId}/access`);
+  },
+
   getLiveChat: async (liveClassId: string) => {
     return request<LiveChatMessage[]>(`/live-classes/${liveClassId}/chat`);
+  },
+
+  getLiveKitJoinToken: async (liveClassId: string, role: 'host' | 'viewer') => {
+    return request<{ liveClassId: string; roomName: string; url: string; token: string; canPublish: boolean }>(
+      `/live-classes/${liveClassId}/livekit/token?role=${role}`,
+    );
   },
 
   postLiveChat: async (liveClassId: string, message: string, kind: 'chat' | 'doubt') => {
     return request<LiveChatMessage>(`/live-classes/${liveClassId}/chat`, {
       method: 'POST',
       body: JSON.stringify({ message, kind }),
+    });
+  },
+
+  startLiveBroadcastSession: async (liveClassId: string) => {
+    return request<{ liveClassId: string; status: string; createdAt: string }>(`/live-classes/${liveClassId}/broadcast/session`, {
+      method: 'POST',
+    });
+  },
+
+  stopLiveBroadcastSession: async (liveClassId: string) => {
+    return request<{ liveClassId: string; stopped: boolean }>(`/live-classes/${liveClassId}/broadcast/session`, {
+      method: 'DELETE',
+    });
+  },
+
+  getLiveBroadcastAdminState: async (liveClassId: string) => {
+    return request<LiveBroadcastAdminState>(`/live-classes/${liveClassId}/broadcast/admin/state`);
+  },
+
+  joinLiveBroadcastAsViewer: async (liveClassId: string) => {
+    return request<{ viewerId: string; liveClassId: string }>(`/live-classes/${liveClassId}/broadcast/viewers`, {
+      method: 'POST',
+    });
+  },
+
+  getLiveBroadcastViewerState: async (liveClassId: string, viewerId: string) => {
+    return request<LiveBroadcastViewerState>(`/live-classes/${liveClassId}/broadcast/viewers/${viewerId}`);
+  },
+
+  postLiveBroadcastOffer: async (liveClassId: string, viewerId: string, offer: RTCSessionDescriptionInit) => {
+    return request<{ viewerId: string; offerId: string }>(`/live-classes/${liveClassId}/broadcast/viewers/${viewerId}/offer`, {
+      method: 'POST',
+      body: JSON.stringify(offer),
+    });
+  },
+
+  postLiveBroadcastAnswer: async (liveClassId: string, viewerId: string, answer: RTCSessionDescriptionInit) => {
+    return request<{ viewerId: string; answerId: string }>(`/live-classes/${liveClassId}/broadcast/viewers/${viewerId}/answer`, {
+      method: 'POST',
+      body: JSON.stringify(answer),
+    });
+  },
+
+  postLiveBroadcastCandidate: async (
+    liveClassId: string,
+    viewerId: string,
+    role: 'admin' | 'viewer',
+    candidate: RTCIceCandidateInit,
+  ) => {
+    return request<{ viewerId: string; candidateId: string }>(`/live-classes/${liveClassId}/broadcast/viewers/${viewerId}/candidates`, {
+      method: 'POST',
+      body: JSON.stringify({
+        role,
+        candidate: candidate.candidate,
+        sdpMid: candidate.sdpMid,
+        sdpMLineIndex: candidate.sdpMLineIndex,
+        usernameFragment: candidate.usernameFragment,
+      }),
     });
   },
 
@@ -414,19 +539,20 @@ export const EduService = {
   ) => {
     const formData = new FormData();
     formData.append('video', file);
-    formData.append('courseId', courseId);
-    formData.append('moduleId', moduleId);
     formData.append('lessonTitle', lessonTitle);
     formData.append('durationMinutes', String(durationMinutes || 0));
-    formData.append('isPremium', String(isPremium || false));
+    formData.append('isPremium', String(Boolean(isPremium)));
+    formData.append('lessonType', 'video');
+
     if (chapterId) {
       formData.append('chapterId', chapterId);
     }
 
-    // Using fetch directly for FormData/multipart
     const response = await fetch(`/backend/api/courses/${courseId}/modules/${moduleId}/videos`, {
       method: 'POST',
-      headers: buildAuthHeaders(),
+      headers: {
+        ...buildAuthHeaders(),
+      },
       body: formData,
     });
 
@@ -436,6 +562,12 @@ export const EduService = {
     }
 
     return response.json();
+  },
+
+  getProtectedLessonPlayback: async (courseId: string, lessonId: string) => {
+    return request<ProtectedLessonPlayback>(`/courses/${courseId}/lessons/${lessonId}/player`, {
+      method: 'GET',
+    });
   },
 
   listVideosInModule: async (courseId: string, moduleId: string) => {

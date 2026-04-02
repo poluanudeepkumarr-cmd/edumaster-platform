@@ -1,9 +1,11 @@
 import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
-import { BookOpen, LoaderCircle, Lock, PlayCircle, Wallet } from 'lucide-react';
+import Hls from 'hls.js';
+import { BookOpen, LoaderCircle, Lock, PlayCircle, Radio, Video, Wallet } from 'lucide-react';
 import { useAuth } from '../AuthContext';
+import { ProtectedLivePlayback } from './ProtectedLivePlayback';
 import { EduService } from '../EduService';
 import { cn } from '../lib/utils';
-import { CourseCard, CourseLesson, PlatformOverview } from '../types';
+import { CourseCard, CourseLesson, LiveClass, LiveClassAccess, PlatformOverview, ProtectedLessonPlayback } from '../types';
 
 const currency = new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 });
 
@@ -20,22 +22,247 @@ const formatPlaybackTime = (seconds: number) => {
   return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
 };
 
-const getYouTubeEmbedUrl = (value?: string) => {
-  if (!value) {
+let youtubeIframeApiPromise: Promise<void> | null = null;
+
+const loadYouTubeIframeApi = () => {
+  if (typeof window === 'undefined') {
+    return Promise.resolve();
+  }
+
+  if ((window as any).YT?.Player) {
+    return Promise.resolve();
+  }
+
+  if (youtubeIframeApiPromise) {
+    return youtubeIframeApiPromise;
+  }
+
+  youtubeIframeApiPromise = new Promise<void>((resolve) => {
+    const existing = document.querySelector<HTMLScriptElement>('script[data-edumaster-youtube-api="true"]');
+    if (existing) {
+      const previous = (window as any).onYouTubeIframeAPIReady;
+      (window as any).onYouTubeIframeAPIReady = () => {
+        previous?.();
+        resolve();
+      };
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://www.youtube.com/iframe_api';
+    script.async = true;
+    script.dataset.edumasterYoutubeApi = 'true';
+
+    const previous = (window as any).onYouTubeIframeAPIReady;
+    (window as any).onYouTubeIframeAPIReady = () => {
+      previous?.();
+      resolve();
+    };
+
+    document.body.appendChild(script);
+  });
+
+  return youtubeIframeApiPromise;
+};
+
+const getYouTubeVideoIdFromEmbedUrl = (embedUrl?: string | null) => {
+  if (!embedUrl) {
     return null;
   }
 
-  if (value.includes('/embed/')) {
-    return value;
-  }
-
   try {
-    const url = new URL(value);
-    const videoId = url.searchParams.get('v') || url.pathname.split('/').filter(Boolean).pop();
-    return videoId ? `https://www.youtube.com/embed/${videoId}` : value;
+    const url = new URL(embedUrl);
+    const candidate = url.pathname.split('/').filter(Boolean).pop();
+    return candidate || null;
   } catch {
-    return value;
+    return null;
   }
+};
+
+const buildSequentialAccessMap = (
+  course: CourseCard | null,
+  lessonProgressMap: Map<string, ResumeRecord>,
+  hasCourseAccess: boolean,
+) => {
+  const accessMap = new Map<string, { unlocked: boolean; reason: string | null }>();
+  const lessonEntries = getModuleLessonEntries(course);
+
+  lessonEntries.forEach((entry, index) => {
+    if (!hasCourseAccess) {
+      accessMap.set(entry.lesson.id, {
+        unlocked: false,
+        reason: 'Enroll in this course to access the lesson player.',
+      });
+      return;
+    }
+
+    if (index === 0) {
+      accessMap.set(entry.lesson.id, { unlocked: true, reason: null });
+      return;
+    }
+
+    const currentProgress = lessonProgressMap.get(entry.lesson.id);
+    if (currentProgress?.completed) {
+      accessMap.set(entry.lesson.id, { unlocked: true, reason: null });
+      return;
+    }
+
+    const previousLessonId = lessonEntries[index - 1]?.lesson.id;
+    const previousProgress = previousLessonId ? lessonProgressMap.get(previousLessonId) : null;
+    const previousUnlocked = Boolean(previousProgress?.completed || Number(previousProgress?.progressPercent || 0) >= 90);
+    accessMap.set(entry.lesson.id, {
+      unlocked: previousUnlocked,
+      reason: previousUnlocked ? null : 'Finish the previous topic to unlock this lesson.',
+    });
+  });
+
+  return accessMap;
+};
+
+const ProtectedYouTubePlayer = ({
+  embedUrl,
+  lessonId,
+  title,
+  playbackSpeed,
+  resumeSeconds,
+  onProgress,
+}: {
+  embedUrl: string;
+  lessonId: string;
+  title: string;
+  playbackSpeed: number;
+  resumeSeconds: number;
+  onProgress: (progressSeconds: number, durationSeconds: number, completed: boolean) => void;
+}) => {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const playerRef = useRef<any>(null);
+  const progressIntervalRef = useRef<number | null>(null);
+  const onProgressRef = useRef(onProgress);
+
+  useEffect(() => {
+    onProgressRef.current = onProgress;
+  }, [onProgress]);
+
+  useEffect(() => {
+    const videoId = getYouTubeVideoIdFromEmbedUrl(embedUrl);
+    if (!containerRef.current || !videoId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const clearProgressInterval = () => {
+      if (progressIntervalRef.current !== null) {
+        window.clearInterval(progressIntervalRef.current);
+        progressIntervalRef.current = null;
+      }
+    };
+
+    const startProgressInterval = () => {
+      clearProgressInterval();
+      progressIntervalRef.current = window.setInterval(() => {
+        const player = playerRef.current;
+        if (!player?.getCurrentTime || !player?.getDuration) {
+          return;
+        }
+
+        const progressSeconds = Number(player.getCurrentTime() || 0);
+        const durationSeconds = Number(player.getDuration() || 0);
+        onProgressRef.current(progressSeconds, durationSeconds, false);
+      }, 10000);
+    };
+
+    void loadYouTubeIframeApi().then(() => {
+      if (cancelled || !containerRef.current) {
+        return;
+      }
+
+      playerRef.current = new (window as any).YT.Player(containerRef.current, {
+        videoId,
+        playerVars: {
+          rel: 0,
+          modestbranding: 1,
+          playsinline: 1,
+          iv_load_policy: 3,
+          disablekb: 1,
+          fs: 0,
+          controls: 1,
+          cc_load_policy: 1,
+          start: Math.max(Math.floor(resumeSeconds || 0), 0),
+        },
+        events: {
+          onReady: (event: any) => {
+            try {
+              if (resumeSeconds > 0) {
+                event.target.seekTo(resumeSeconds, true);
+              }
+              event.target.setPlaybackRate(playbackSpeed);
+            } catch {
+              // Ignore player readiness race conditions.
+            }
+          },
+          onStateChange: (event: any) => {
+            const player = event.target;
+            const playerState = (window as any).YT?.PlayerState;
+
+            if (event.data === playerState?.PLAYING) {
+              startProgressInterval();
+              return;
+            }
+
+            if (event.data === playerState?.PAUSED) {
+              clearProgressInterval();
+              onProgressRef.current(Number(player.getCurrentTime?.() || 0), Number(player.getDuration?.() || 0), false);
+              return;
+            }
+
+            if (event.data === playerState?.ENDED) {
+              clearProgressInterval();
+              onProgressRef.current(Number(player.getDuration?.() || 0), Number(player.getDuration?.() || 0), true);
+              return;
+            }
+
+            if (event.data === playerState?.BUFFERING) {
+              return;
+            }
+
+            clearProgressInterval();
+          },
+        },
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      clearProgressInterval();
+
+      const player = playerRef.current;
+      if (player?.getCurrentTime && player?.getDuration) {
+        onProgressRef.current(Number(player.getCurrentTime() || 0), Number(player.getDuration() || 0), false);
+      }
+
+      try {
+        player?.destroy?.();
+      } catch {
+        // Ignore destroy errors during fast navigation.
+      }
+      playerRef.current = null;
+    };
+  }, [embedUrl, lessonId, resumeSeconds]);
+
+  useEffect(() => {
+    try {
+      playerRef.current?.setPlaybackRate?.(playbackSpeed);
+    } catch {
+      // Ignore unsupported playback rate updates.
+    }
+  }, [playbackSpeed]);
+
+  return (
+    <div className="relative aspect-video w-full bg-black">
+      <div ref={containerRef} className="h-full w-full" aria-label={title} />
+    </div>
+  );
 };
 
 const SectionHeader = ({ title, caption }: { title: string; caption: string }) => (
@@ -187,18 +414,59 @@ const getCourseProgressSnapshot = (
   };
 };
 
+const getLiveRecordingGroups = (course: CourseCard | null, liveClasses: LiveClass[]) => {
+  if (!course) {
+    return [];
+  }
+
+  const grouped = new Map<string, {
+    key: string;
+    moduleId: string | null;
+    moduleTitle: string;
+    chapterId: string | null;
+    chapterTitle: string | null;
+    recordings: LiveClass[];
+  }>();
+
+  liveClasses
+    .filter((liveClass) => {
+      const status = String(liveClass.status || '').toLowerCase();
+      return liveClass.courseId === course._id
+        && ['ended', 'replay'].includes(status || 'ended');
+    })
+    .forEach((liveClass) => {
+      const key = `${liveClass.moduleId || 'course'}::${liveClass.chapterId || 'root'}`;
+      const group = grouped.get(key) || {
+        key,
+        moduleId: liveClass.moduleId || null,
+        moduleTitle: liveClass.moduleTitle || course.subject || 'Course recordings',
+        chapterId: liveClass.chapterId || null,
+        chapterTitle: liveClass.chapterTitle || null,
+        recordings: [],
+      };
+      group.recordings.push(liveClass);
+      grouped.set(key, group);
+    });
+
+  return Array.from(grouped.values()).sort((left, right) => left.moduleTitle.localeCompare(right.moduleTitle));
+};
+
 export const CoursesTab = ({
   overview,
   onRefresh,
   initialCourseId,
   initialLessonId,
   onResumeNavigationHandled,
+  savedTopicIds,
+  onToggleSavedTopic,
 }: {
   overview: PlatformOverview;
   onRefresh: () => Promise<void>;
   initialCourseId?: string | null;
   initialLessonId?: string | null;
   onResumeNavigationHandled?: () => void;
+  savedTopicIds: string[];
+  onToggleSavedTopic: (courseId: string, lessonId: string) => void;
 }) => {
   const { user } = useAuth();
   const enrolledCourseCount = useMemo(
@@ -220,7 +488,19 @@ export const CoursesTab = ({
   const [selectedLessonId, setSelectedLessonId] = useState<string | null>(initialLessonId || null);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [busyCourseId, setBusyCourseId] = useState<string | null>(null);
+  const [lessonDoubt, setLessonDoubt] = useState('');
+  const [lessonDoubtAnswer, setLessonDoubtAnswer] = useState<string | null>(null);
+  const [askingLessonDoubt, setAskingLessonDoubt] = useState(false);
+  const [protectedLessonPlayback, setProtectedLessonPlayback] = useState<ProtectedLessonPlayback | null>(null);
+  const [loadingProtectedLesson, setLoadingProtectedLesson] = useState(false);
+  const [protectedLessonError, setProtectedLessonError] = useState<string | null>(null);
+  const [selectedRecordingId, setSelectedRecordingId] = useState<string | null>(null);
+  const [selectedRecordingAccess, setSelectedRecordingAccess] = useState<LiveClassAccess | null>(null);
+  const [loadingRecordingAccess, setLoadingRecordingAccess] = useState(false);
+  const [recordingAccessError, setRecordingAccessError] = useState<string | null>(null);
+  const [securityBlocked, setSecurityBlocked] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const lastProgressSyncRef = useRef<Record<string, number>>({});
   const appliedResumeRef = useRef<Record<string, number>>({});
   const activeCourseIdRef = useRef<string | null>(selectedCourseId);
@@ -292,6 +572,14 @@ export const CoursesTab = ({
       || lessons[0]
       || null;
   }, [selectedCourse, selectedLessonId]);
+  const selectedCourseRecordingGroups = useMemo(
+    () => getLiveRecordingGroups(selectedCourse, overview.liveClasses || []),
+    [selectedCourse, overview.liveClasses],
+  );
+  const selectedCourseRecordings = useMemo(
+    () => selectedCourseRecordingGroups.flatMap((group) => group.recordings),
+    [selectedCourseRecordingGroups],
+  );
 
   useEffect(() => {
     if (!selectedCourseId && filteredCourses[0]) {
@@ -332,6 +620,20 @@ export const CoursesTab = ({
 
     setSelectedLessonId(selectedCourse.continueLesson?.id || lessonIds[0] || null);
   }, [selectedCourse, selectedLessonId]);
+
+  useEffect(() => {
+    if (selectedCourseRecordings.length === 0) {
+      setSelectedRecordingId(null);
+      setSelectedRecordingAccess(null);
+      setRecordingAccessError(null);
+      setLoadingRecordingAccess(false);
+      return;
+    }
+
+    if (!selectedRecordingId || !selectedCourseRecordings.some((item) => item._id === selectedRecordingId)) {
+      setSelectedRecordingId(selectedCourseRecordings[0]._id);
+    }
+  }, [selectedCourseRecordings, selectedRecordingId]);
 
   const handleUnlock = async (course: CourseCard) => {
     if (!user) {
@@ -415,9 +717,9 @@ export const CoursesTab = ({
   };
 
   const selectedLesson = selectedLessonMeta?.lesson || null;
-  const canAccessLesson = Boolean(selectedCourse?.enrolled || (!selectedLesson?.premium && !selectedLesson?.locked));
-  const embedUrl = selectedLesson?.type === 'youtube' ? getYouTubeEmbedUrl(selectedLesson.videoUrl) : null;
+  const hasCourseAccess = Boolean(user && (user.role === 'admin' || selectedCourse?.enrolled));
   const hostedVideoUrl = selectedLesson?.type === 'video' ? selectedLesson.videoUrl || null : null;
+  const privateVideoStreamUrl = selectedLesson?.type === 'private-video' ? protectedLessonPlayback?.streamUrl || null : null;
   const effectiveLessonProgress = useMemo(() => {
     const merged = new Map<string, ResumeRecord>();
 
@@ -442,10 +744,23 @@ export const CoursesTab = ({
     return history[0]?.lessonId || null;
   }, [effectiveLessonProgress]);
   const selectedLessonProgress = selectedLesson ? lessonProgressMap.get(selectedLesson.id) : null;
+  const sequentialAccessMap = useMemo(
+    () => buildSequentialAccessMap(selectedCourse, lessonProgressMap, hasCourseAccess),
+    [selectedCourse, lessonProgressMap, hasCourseAccess],
+  );
+  const selectedLessonAccess = selectedLesson ? sequentialAccessMap.get(selectedLesson.id) : null;
+  const canAccessLesson = Boolean(
+    selectedLesson
+      && hasCourseAccess
+      && !selectedLesson.locked
+      && (!['youtube', 'private-video'].includes(selectedLesson.type) || selectedLessonAccess?.unlocked),
+  );
   const selectedCourseSnapshot = useMemo(
     () => selectedCourse ? getCourseProgressSnapshot(selectedCourse, lessonProgressOverrides) : { totalLessons: 0, completedLessons: 0, progressPercent: 0 },
     [selectedCourse, lessonProgressOverrides],
   );
+  const savedTopicSet = useMemo(() => new Set(savedTopicIds), [savedTopicIds]);
+  const selectedLessonSaved = Boolean(selectedCourse && selectedLesson && savedTopicSet.has(`${selectedCourse._id}:${selectedLesson.id}`));
 
   useEffect(() => {
     activeCourseIdRef.current = selectedCourse?._id || null;
@@ -471,6 +786,87 @@ export const CoursesTab = ({
   }, [selectedLesson, selectedCourse?._id, canAccessLesson]);
 
   useEffect(() => {
+    if (!selectedLesson || !['youtube', 'private-video'].includes(selectedLesson.type) || !selectedCourse?._id) {
+      setProtectedLessonPlayback(null);
+      setProtectedLessonError(null);
+      setLoadingProtectedLesson(false);
+      return;
+    }
+
+    if (!canAccessLesson) {
+      setProtectedLessonPlayback(null);
+      setProtectedLessonError(selectedLessonAccess?.reason || 'Course access is required to watch this lesson.');
+      setLoadingProtectedLesson(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingProtectedLesson(true);
+    setProtectedLessonError(null);
+    setProtectedLessonPlayback(null);
+
+    void EduService.getProtectedLessonPlayback(selectedCourse._id, selectedLesson.id)
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+
+        setProtectedLessonPlayback(payload);
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+
+        setProtectedLessonError(error instanceof Error ? error.message : 'Unable to prepare protected playback.');
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingProtectedLesson(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCourse?._id, selectedLesson?.id, selectedLesson?.type, selectedLessonAccess?.reason, canAccessLesson]);
+
+  useEffect(() => {
+    if (!selectedRecordingId || !user) {
+      setSelectedRecordingAccess(null);
+      setRecordingAccessError(null);
+      setLoadingRecordingAccess(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingRecordingAccess(true);
+    setRecordingAccessError(null);
+    setSelectedRecordingAccess(null);
+
+    void EduService.getLiveClassAccess(selectedRecordingId)
+      .then((payload) => {
+        if (!cancelled) {
+          setSelectedRecordingAccess(payload);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setRecordingAccessError(error instanceof Error ? error.message : 'Unable to prepare recording playback.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingRecordingAccess(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRecordingId, user]);
+
+  useEffect(() => {
     setLessonProgressOverrides({});
     lastProgressSyncRef.current = {};
   }, [selectedCourse?._id]);
@@ -492,7 +888,44 @@ export const CoursesTab = ({
     if (videoRef.current) {
       videoRef.current.playbackRate = playbackSpeed;
     }
-  }, [playbackSpeed, hostedVideoUrl]);
+  }, [playbackSpeed, hostedVideoUrl, privateVideoStreamUrl]);
+
+  useEffect(() => {
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+
+    const currentVideo = videoRef.current;
+    if (!currentVideo || !privateVideoStreamUrl || protectedLessonPlayback?.streamFormat !== 'hls') {
+      return;
+    }
+
+    if (currentVideo.canPlayType('application/vnd.apple.mpegurl')) {
+      currentVideo.src = privateVideoStreamUrl;
+      return;
+    }
+
+    if (!Hls.isSupported()) {
+      return;
+    }
+
+    const hls = new Hls({
+      enableWorker: true,
+      maxBufferLength: 30,
+      backBufferLength: 30,
+    });
+    hlsRef.current = hls;
+    hls.loadSource(privateVideoStreamUrl);
+    hls.attachMedia(currentVideo);
+
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+    };
+  }, [privateVideoStreamUrl, protectedLessonPlayback?.streamFormat, selectedLesson?.id]);
 
   const persistLessonProgress = async (
     courseId: string,
@@ -682,6 +1115,44 @@ export const CoursesTab = ({
     );
   }, [hostedVideoUrl, selectedLesson?.id, selectedLessonProgress?.progressSeconds]);
 
+  useEffect(() => {
+    if (!selectedLesson || !canAccessLesson) {
+      setSecurityBlocked(false);
+      return;
+    }
+
+    const handleContextMenu = (event: MouseEvent) => {
+      event.preventDefault();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const blockedShortcut = event.key === 'F12'
+        || (event.ctrlKey && event.shiftKey && ['I', 'J', 'C'].includes(event.key.toUpperCase()));
+
+      if (blockedShortcut) {
+        event.preventDefault();
+        setSecurityBlocked(true);
+      }
+    };
+
+    const inspectDevTools = () => {
+      const widthGap = Math.abs(window.outerWidth - window.innerWidth);
+      const heightGap = Math.abs(window.outerHeight - window.innerHeight);
+      setSecurityBlocked(widthGap > 160 || heightGap > 160);
+    };
+
+    document.addEventListener('contextmenu', handleContextMenu);
+    window.addEventListener('keydown', handleKeyDown);
+    inspectDevTools();
+    const intervalId = window.setInterval(inspectDevTools, 1500);
+
+    return () => {
+      document.removeEventListener('contextmenu', handleContextMenu);
+      window.removeEventListener('keydown', handleKeyDown);
+      window.clearInterval(intervalId);
+    };
+  }, [selectedLesson?.id, canAccessLesson]);
+
   const handleSelectCourse = (courseId: string) => {
     void flushTrackedPlayback();
     setSelectedCourseId(courseId);
@@ -691,6 +1162,48 @@ export const CoursesTab = ({
     void flushTrackedPlayback();
     setSelectedLessonId(lessonId);
   };
+
+  const markLessonComplete = async () => {
+    if (!selectedCourse || !selectedLesson) {
+      return;
+    }
+
+    await persistLessonProgress(
+      selectedCourse._id,
+      true,
+      selectedLesson,
+      Math.max(
+        Math.round((selectedLesson.durationMinutes || 0) * 60),
+        protectedLessonPlayback?.resumeSeconds || 0,
+        selectedLessonProgress?.progressSeconds || 0,
+      ),
+      true,
+      true,
+      Math.round((selectedLesson.durationMinutes || 0) * 60),
+    );
+    await onRefresh();
+  };
+
+  const askLessonDoubt = async () => {
+    if (!selectedCourse || !selectedLesson || !lessonDoubt.trim()) {
+      return;
+    }
+
+    setAskingLessonDoubt(true);
+    try {
+      const response = await EduService.askAi(
+        `Student doubt for ${selectedCourse.title} > ${selectedLesson.title}: ${lessonDoubt.trim()}`,
+      );
+      setLessonDoubtAnswer(response.answer);
+    } finally {
+      setAskingLessonDoubt(false);
+    }
+  };
+
+  useEffect(() => {
+    setLessonDoubt('');
+    setLessonDoubtAnswer(null);
+  }, [selectedCourse?._id, selectedLesson?.id]);
 
   return (
     <div className="grid gap-6 xl:grid-cols-[minmax(360px,0.92fr)_minmax(0,1.08fr)]">
@@ -843,7 +1356,9 @@ export const CoursesTab = ({
                       {selectedLessonMeta?.chapterTitle ? `${selectedLessonMeta.moduleTitle} • ${selectedLessonMeta.chapterTitle}` : selectedLessonMeta?.moduleTitle}
                     </p>
                     <h3 className="mt-2 text-2xl font-semibold">{selectedLesson.title}</h3>
-                    <p className="mt-3 text-sm leading-7 text-white/70">{selectedLesson.durationMinutes} min • {selectedLesson.type} • {canAccessLesson ? 'Resume-ready playback' : 'Purchase required to unlock this premium topic'}</p>
+                    <p className="mt-3 text-sm leading-7 text-white/70">
+                      {selectedLesson.durationMinutes} min • {selectedLesson.type} • {canAccessLesson ? 'Protected playback with progress sync' : (selectedLessonAccess?.reason || 'Course access required')}
+                    </p>
                   </div>
                   <div className="flex flex-wrap items-center gap-3">
                     <label className="rounded-full border border-white/15 bg-white/8 px-4 py-2 text-sm text-white/80">
@@ -859,17 +1374,163 @@ export const CoursesTab = ({
                         Open notes PDF
                       </a>
                     )}
+                    <button
+                      onClick={() => onToggleSavedTopic(selectedCourse._id, selectedLesson.id)}
+                      className={cn(
+                        'rounded-full border px-4 py-2 text-sm font-medium transition',
+                        selectedLessonSaved ? 'border-white/20 bg-white text-[var(--ink)]' : 'border-white/15 bg-white/8 text-white/80',
+                      )}
+                    >
+                      {selectedLessonSaved ? 'Saved topic' : 'Save topic'}
+                    </button>
                     {selectedLessonProgress?.completed && (
                       <span className="rounded-full bg-[var(--success-soft)] px-4 py-2 text-sm font-semibold text-[var(--success)]">
                         Topic completed
                       </span>
                     )}
+                    {canAccessLesson && !selectedLessonProgress?.completed && (
+                      <button
+                        onClick={() => void markLessonComplete()}
+                        className="rounded-full border border-white/15 bg-white/8 px-4 py-2 text-sm font-medium text-white/80"
+                      >
+                        Mark complete & unlock next
+                      </button>
+                    )}
                   </div>
                 </div>
 
                 <div className="mt-5 overflow-hidden rounded-[24px] border border-white/10 bg-black/25">
-                  {canAccessLesson && embedUrl ? (
-                    <iframe src={embedUrl} title={selectedLesson.title} className="aspect-video w-full" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen />
+                  {securityBlocked ? (
+                    <div className="flex aspect-video flex-col items-center justify-center gap-4 px-6 text-center">
+                      <Lock className="h-10 w-10 text-[var(--accent-rust)]" />
+                      <div>
+                        <p className="text-lg font-semibold">Protected player paused</p>
+                        <p className="mt-2 text-sm leading-7 text-white/68">Developer tools and inspection shortcuts are blocked during lesson playback. Close them to continue learning.</p>
+                      </div>
+                    </div>
+                  ) : canAccessLesson && ['youtube', 'private-video'].includes(selectedLesson.type) && loadingProtectedLesson ? (
+                    <div className="flex aspect-video items-center justify-center gap-3">
+                      <LoaderCircle className="h-6 w-6 animate-spin text-white/75" />
+                      <span className="text-sm text-white/75">Preparing protected lesson player...</span>
+                    </div>
+                  ) : canAccessLesson && selectedLesson.type === 'youtube' && protectedLessonPlayback?.embedUrl ? (
+                    <ProtectedYouTubePlayer
+                      embedUrl={protectedLessonPlayback.embedUrl}
+                      lessonId={selectedLesson.id}
+                      title={selectedLesson.title}
+                      playbackSpeed={playbackSpeed}
+                      resumeSeconds={protectedLessonPlayback.resumeSeconds}
+                      onProgress={(progressSeconds, durationSeconds, completed) => {
+                        playbackSnapshotRef.current = {
+                          lesson: selectedLesson,
+                          courseId: selectedCourse._id,
+                          canAccess: canAccessLesson,
+                          progressSeconds,
+                          mediaDurationSeconds: durationSeconds,
+                          completed,
+                        };
+                        void persistLessonProgress(
+                          selectedCourse._id,
+                          canAccessLesson,
+                          selectedLesson,
+                          progressSeconds,
+                          completed,
+                          completed,
+                          durationSeconds,
+                        );
+                      }}
+                    />
+                  ) : canAccessLesson && selectedLesson.type === 'private-video' && privateVideoStreamUrl ? (
+                    <video
+                      key={`${selectedLesson.id}:${privateVideoStreamUrl}`}
+                      ref={videoRef}
+                      src={protectedLessonPlayback?.streamFormat === 'source' ? privateVideoStreamUrl : undefined}
+                      onLoadedMetadata={(event) => {
+                        const resumeSeconds = protectedLessonPlayback?.resumeSeconds || selectedLessonProgress?.progressSeconds || 0;
+                        if (resumeSeconds > 0) {
+                          seekHostedVideoToResume(
+                            event.currentTarget,
+                            selectedLesson.id,
+                            resumeSeconds,
+                            appliedResumeRef,
+                          );
+                        }
+                      }}
+                      onCanPlay={(event) => {
+                        const resumeSeconds = protectedLessonPlayback?.resumeSeconds || selectedLessonProgress?.progressSeconds || 0;
+                        if (resumeSeconds > 0) {
+                          seekHostedVideoToResume(
+                            event.currentTarget,
+                            selectedLesson.id,
+                            resumeSeconds,
+                            appliedResumeRef,
+                          );
+                        }
+                      }}
+                      onTimeUpdate={(event) => {
+                        playbackSnapshotRef.current = {
+                          lesson: selectedLesson,
+                          courseId: selectedCourse._id,
+                          canAccess: canAccessLesson,
+                          progressSeconds: event.currentTarget.currentTime,
+                          mediaDurationSeconds: event.currentTarget.duration || 0,
+                          completed: false,
+                        };
+                        void persistLessonProgress(
+                          selectedCourse._id,
+                          canAccessLesson,
+                          selectedLesson,
+                          event.currentTarget.currentTime,
+                          false,
+                          false,
+                          event.currentTarget.duration,
+                        );
+                      }}
+                      onPause={(event) => {
+                        playbackSnapshotRef.current = {
+                          lesson: selectedLesson,
+                          courseId: selectedCourse._id,
+                          canAccess: canAccessLesson,
+                          progressSeconds: event.currentTarget.currentTime,
+                          mediaDurationSeconds: event.currentTarget.duration || 0,
+                          completed: false,
+                        };
+                        void persistLessonProgress(
+                          selectedCourse._id,
+                          canAccessLesson,
+                          selectedLesson,
+                          event.currentTarget.currentTime,
+                          false,
+                          true,
+                          event.currentTarget.duration,
+                        );
+                      }}
+                      onEnded={(event) => {
+                        playbackSnapshotRef.current = {
+                          lesson: selectedLesson,
+                          courseId: selectedCourse._id,
+                          canAccess: canAccessLesson,
+                          progressSeconds: event.currentTarget.currentTime,
+                          mediaDurationSeconds: event.currentTarget.duration || 0,
+                          completed: true,
+                        };
+                        void persistLessonProgress(
+                          selectedCourse._id,
+                          canAccessLesson,
+                          selectedLesson,
+                          event.currentTarget.currentTime,
+                          true,
+                          true,
+                          event.currentTarget.duration,
+                        );
+                      }}
+                      controls
+                      controlsList="nodownload noplaybackrate"
+                      disablePictureInPicture
+                      playsInline
+                      preload="metadata"
+                      className="aspect-video w-full bg-black"
+                    />
                   ) : canAccessLesson && hostedVideoUrl ? (
                     <video
                       key={`${selectedLesson.id}:${hostedVideoUrl}`}
@@ -963,6 +1624,14 @@ export const CoursesTab = ({
                       preload="metadata"
                       className="aspect-video w-full bg-black"
                     />
+                  ) : canAccessLesson && ['youtube', 'private-video'].includes(selectedLesson.type) && protectedLessonError ? (
+                    <div className="flex aspect-video flex-col items-center justify-center gap-4 px-6 text-center">
+                      <Lock className="h-10 w-10 text-[var(--accent-rust)]" />
+                      <div>
+                        <p className="text-lg font-semibold">Protected lesson unavailable</p>
+                        <p className="mt-2 text-sm leading-7 text-white/68">{protectedLessonError}</p>
+                      </div>
+                    </div>
                   ) : canAccessLesson ? (
                     <div className="flex aspect-video flex-col justify-between p-6">
                       <div>
@@ -979,8 +1648,8 @@ export const CoursesTab = ({
                     <div className="flex aspect-video flex-col items-center justify-center gap-4 px-6 text-center">
                       <Lock className="h-10 w-10 text-[var(--accent-rust)]" />
                       <div>
-                        <p className="text-lg font-semibold">Premium lesson locked</p>
-                        <p className="mt-2 text-sm leading-7 text-white/68">Enroll in this course to unlock protected video playback, notes, and tracked progress for this topic.</p>
+                        <p className="text-lg font-semibold">Lesson locked</p>
+                        <p className="mt-2 text-sm leading-7 text-white/68">{selectedLessonAccess?.reason || 'Enroll in this course to unlock protected video playback, notes, and tracked progress for this topic.'}</p>
                       </div>
                     </div>
                   )}
@@ -994,6 +1663,134 @@ export const CoursesTab = ({
                 {selectedLessonProgress && !selectedLessonProgress.completed && (
                   <div className="mt-4 rounded-[22px] border border-white/10 bg-white/6 p-4 text-sm text-white/82">
                     Resume saved at <span className="font-semibold text-white">{formatPlaybackTime(selectedLessonProgress.progressSeconds)}</span>. If you close the app or switch tabs, playback continues from this time when you come back.
+                  </div>
+                )}
+                {canAccessLesson && selectedLesson.type === 'private-video' && protectedLessonPlayback?.statusMessage && (
+                  <div className="mt-4 rounded-[22px] border border-white/10 bg-white/6 p-4 text-sm text-white/82">
+                    <span className="font-semibold text-white">Delivery mode:</span> {protectedLessonPlayback.statusMessage}
+                    {protectedLessonPlayback.availableQualities?.length ? ` Target qualities: ${protectedLessonPlayback.availableQualities.join(', ')}.` : ''}
+                  </div>
+                )}
+
+                <div className="mt-4 rounded-[22px] border border-white/10 bg-white/6 p-4">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="max-w-2xl">
+                      <p className="text-sm font-semibold text-white">Ask a topic doubt</p>
+                      <p className="mt-1 text-sm leading-6 text-white/70">
+                        Stay inside the lesson flow. Ask for concept clarification, a shortcut, or an exam-oriented explanation for this topic.
+                      </p>
+                    </div>
+                    <div className="w-full max-w-xl space-y-3">
+                      <textarea
+                        value={lessonDoubt}
+                        onChange={(event) => setLessonDoubt(event.target.value)}
+                        placeholder={`Ask about ${selectedLesson.title}...`}
+                        className="h-24 w-full rounded-[20px] border border-white/12 bg-black/15 px-4 py-3 text-sm text-white outline-none placeholder:text-white/35"
+                      />
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          onClick={() => void askLessonDoubt()}
+                          disabled={askingLessonDoubt || !lessonDoubt.trim()}
+                          className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-[var(--ink)] disabled:opacity-55"
+                        >
+                          {askingLessonDoubt ? 'Thinking...' : 'Ask AI doubt helper'}
+                        </button>
+                        <span className="text-xs uppercase tracking-[0.16em] text-white/45">
+                          Topic context included automatically
+                        </span>
+                      </div>
+                      {lessonDoubtAnswer && (
+                        <div className="rounded-[20px] border border-white/10 bg-black/15 p-4 text-sm leading-7 text-white/82">
+                          {lessonDoubtAnswer}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {selectedCourseRecordings.length > 0 && (
+                  <div className="mt-6 rounded-[24px] border border-white/10 bg-white/6 p-5">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                      <div>
+                        <p className="text-sm font-semibold text-white">Course recordings</p>
+                        <p className="mt-1 text-sm leading-6 text-white/70">
+                          Finished live classes are grouped under the subject and chapter you mapped in admin.
+                        </p>
+                      </div>
+                      <div className="inline-flex items-center gap-2 rounded-full border border-white/12 px-3 py-2 text-xs uppercase tracking-[0.16em] text-white/70">
+                        <Video className="h-4 w-4" />
+                        {selectedCourseRecordings.length} replay{selectedCourseRecordings.length === 1 ? '' : 's'}
+                      </div>
+                    </div>
+
+                    <div className="mt-5 space-y-4">
+                      {selectedCourseRecordingGroups.map((group) => (
+                        <div key={group.key} className="rounded-[20px] border border-white/10 bg-black/15 p-4">
+                          <div className="flex items-center justify-between gap-3">
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-[0.18em] text-white/48">Recording path</p>
+                              <p className="mt-1 text-sm font-semibold text-white">
+                                {[group.moduleTitle, group.chapterTitle].filter(Boolean).join(' • ')}
+                              </p>
+                            </div>
+                            <span className="rounded-full border border-white/10 px-3 py-1 text-xs font-semibold text-white/70">
+                              {group.recordings.length} item{group.recordings.length === 1 ? '' : 's'}
+                            </span>
+                          </div>
+                          <div className="mt-4 space-y-3">
+                            {group.recordings.map((recording) => (
+                              <div key={recording._id} className="flex flex-col gap-3 rounded-[18px] bg-white/6 p-4 sm:flex-row sm:items-center sm:justify-between">
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    <Radio className="h-4 w-4 text-[var(--accent-rust)]" />
+                                    <p className="font-medium text-white">{recording.title}</p>
+                                  </div>
+                                  <p className="mt-2 text-sm text-white/68">
+                                    {recording.instructor} • {new Date(recording.startTime).toLocaleString('en-IN')} • {recording.replayReady ? 'replay ready' : 'replay pending'}
+                                  </p>
+                                </div>
+                                <button
+                                  onClick={() => setSelectedRecordingId(recording._id)}
+                                  disabled={!recording.replayReady}
+                                  className={cn(
+                                    'rounded-full border px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-55',
+                                    selectedRecordingId === recording._id
+                                      ? 'border-white bg-white text-[var(--ink)]'
+                                      : 'border-white/12 bg-transparent text-white hover:border-white/30',
+                                  )}
+                                >
+                                  {!recording.replayReady ? 'Replay pending' : selectedRecordingId === recording._id ? 'Watching replay' : 'Watch replay'}
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="mt-5">
+                      {!user ? (
+                        <div className="rounded-[20px] border border-dashed border-white/12 p-4 text-sm text-white/68">
+                          Log in to watch protected replays inside the course experience.
+                        </div>
+                      ) : loadingRecordingAccess ? (
+                        <div className="flex items-center gap-3 rounded-[20px] border border-white/10 p-4 text-sm text-white/68">
+                          <LoaderCircle className="h-5 w-5 animate-spin" />
+                          Preparing secure replay access…
+                        </div>
+                      ) : recordingAccessError ? (
+                        <div className="rounded-[20px] border border-dashed border-white/12 p-4 text-sm text-white/68">
+                          {recordingAccessError}
+                        </div>
+                      ) : selectedRecordingAccess ? (
+                        <div className="space-y-4">
+                          <ProtectedLivePlayback access={selectedRecordingAccess} />
+                          <div className="rounded-[20px] border border-white/10 bg-black/15 p-4 text-sm text-white/76">
+                            {selectedRecordingAccess.statusMessage}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 )}
               </div>
@@ -1032,6 +1829,7 @@ export const CoursesTab = ({
                   <div className="mt-4 space-y-3">
                     {(module.lessons || []).map((lesson) => {
                       const lessonProgress = lessonProgressMap.get(lesson.id);
+                      const lessonAccess = sequentialAccessMap.get(lesson.id);
                       const isCompleted = Boolean(lessonProgress?.completed);
                       const isLastWatched = lastWatchedLessonId === lesson.id;
                       const progressText = lessonProgress ? isCompleted ? 'Completed' : `${lessonProgress.progressPercent}% watched` : 'Not started';
@@ -1040,9 +1838,12 @@ export const CoursesTab = ({
                         <div key={lesson.id} className="flex flex-col gap-3 rounded-[22px] bg-[var(--accent-cream)] p-4 sm:flex-row sm:items-center sm:justify-between">
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
-                              {lesson.type === 'youtube' ? <PlayCircle className="h-4 w-4 text-[var(--accent-rust)]" /> : lesson.premium ? <Lock className="h-4 w-4 text-[var(--accent-rust)]" /> : <BookOpen className="h-4 w-4 text-[var(--accent-rust)]" />}
+                              {['youtube', 'private-video'].includes(lesson.type) ? <PlayCircle className="h-4 w-4 text-[var(--accent-rust)]" /> : lesson.premium ? <Lock className="h-4 w-4 text-[var(--accent-rust)]" /> : <BookOpen className="h-4 w-4 text-[var(--accent-rust)]" />}
                               <p className="font-medium text-[var(--ink)]">{lesson.title}</p>
                               {lesson.locked && <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[var(--accent-rust)]">Locked</span>}
+                              {!lesson.locked && ['youtube', 'private-video'].includes(lesson.type) && lessonAccess && !lessonAccess.unlocked && (
+                                <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[var(--accent-rust)]">Next after previous</span>
+                              )}
                               {isCompleted && <span className="rounded-full bg-[var(--success-soft)] px-3 py-1 text-xs font-semibold text-[var(--success)]">Completed</span>}
                               {!isCompleted && isLastWatched && <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[var(--ink)]">Last watched</span>}
                             </div>
@@ -1056,7 +1857,10 @@ export const CoursesTab = ({
                           </div>
                           <div className="flex flex-wrap gap-2">
                             <button onClick={() => handleSelectLesson(lesson.id)} className={cn('rounded-full border px-4 py-2 text-sm font-medium transition', selectedLesson?.id === lesson.id ? 'border-[var(--accent-rust)] bg-white text-[var(--accent-rust)]' : 'border-[var(--line)] bg-white text-[var(--ink)] hover:border-[var(--accent-rust)]')}>
-                              {lesson.locked ? 'Preview' : isCompleted ? 'Rewatch' : 'Watch'}
+                              {lesson.locked ? 'Locked' : ['youtube', 'private-video'].includes(lesson.type) && lessonAccess && !lessonAccess.unlocked ? 'Unlock next' : isCompleted ? 'Rewatch' : 'Watch'}
+                            </button>
+                            <button onClick={() => onToggleSavedTopic(selectedCourse._id, lesson.id)} className="rounded-full border border-[var(--line)] bg-white px-4 py-2 text-sm font-medium text-[var(--ink)] transition hover:border-[var(--accent-rust)]">
+                              {savedTopicSet.has(`${selectedCourse._id}:${lesson.id}`) ? 'Saved' : 'Save'}
                             </button>
                           </div>
                         </div>
@@ -1078,6 +1882,7 @@ export const CoursesTab = ({
                         <div className="mt-4 space-y-3">
                           {(chapter.lessons || []).map((lesson) => {
                             const lessonProgress = lessonProgressMap.get(lesson.id);
+                            const lessonAccess = sequentialAccessMap.get(lesson.id);
                             const isCompleted = Boolean(lessonProgress?.completed);
                             const isLastWatched = lastWatchedLessonId === lesson.id;
                             const progressText = lessonProgress ? isCompleted ? 'Completed' : `${lessonProgress.progressPercent}% watched` : 'Not started';
@@ -1086,9 +1891,12 @@ export const CoursesTab = ({
                               <div key={lesson.id} className="flex flex-col gap-3 rounded-[20px] bg-[var(--accent-cream)] p-4 sm:flex-row sm:items-center sm:justify-between">
                                 <div className="min-w-0">
                                   <div className="flex items-center gap-2">
-                                    {lesson.type === 'youtube' ? <PlayCircle className="h-4 w-4 text-[var(--accent-rust)]" /> : lesson.premium ? <Lock className="h-4 w-4 text-[var(--accent-rust)]" /> : <BookOpen className="h-4 w-4 text-[var(--accent-rust)]" />}
+                                    {['youtube', 'private-video'].includes(lesson.type) ? <PlayCircle className="h-4 w-4 text-[var(--accent-rust)]" /> : lesson.premium ? <Lock className="h-4 w-4 text-[var(--accent-rust)]" /> : <BookOpen className="h-4 w-4 text-[var(--accent-rust)]" />}
                                     <p className="font-medium text-[var(--ink)]">{lesson.title}</p>
                                     {lesson.locked && <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[var(--accent-rust)]">Locked</span>}
+                                    {!lesson.locked && ['youtube', 'private-video'].includes(lesson.type) && lessonAccess && !lessonAccess.unlocked && (
+                                      <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[var(--accent-rust)]">Next after previous</span>
+                                    )}
                                     {isCompleted && <span className="rounded-full bg-[var(--success-soft)] px-3 py-1 text-xs font-semibold text-[var(--success)]">Completed</span>}
                                     {!isCompleted && isLastWatched && <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-[var(--ink)]">Last watched</span>}
                                   </div>
@@ -1102,7 +1910,10 @@ export const CoursesTab = ({
                                 </div>
                                 <div className="flex flex-wrap gap-2">
                                   <button onClick={() => handleSelectLesson(lesson.id)} className={cn('rounded-full border px-4 py-2 text-sm font-medium transition', selectedLesson?.id === lesson.id ? 'border-[var(--accent-rust)] bg-white text-[var(--accent-rust)]' : 'border-[var(--line)] bg-white text-[var(--ink)] hover:border-[var(--accent-rust)]')}>
-                                    {lesson.locked ? 'Preview' : isCompleted ? 'Rewatch' : 'Watch'}
+                                    {lesson.locked ? 'Locked' : ['youtube', 'private-video'].includes(lesson.type) && lessonAccess && !lessonAccess.unlocked ? 'Unlock next' : isCompleted ? 'Rewatch' : 'Watch'}
+                                  </button>
+                                  <button onClick={() => onToggleSavedTopic(selectedCourse._id, lesson.id)} className="rounded-full border border-[var(--line)] bg-white px-4 py-2 text-sm font-medium text-[var(--ink)] transition hover:border-[var(--accent-rust)]">
+                                    {savedTopicSet.has(`${selectedCourse._id}:${lesson.id}`) ? 'Saved' : 'Save'}
                                   </button>
                                 </div>
                               </div>
