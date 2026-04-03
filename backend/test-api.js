@@ -171,20 +171,29 @@ const testEndpoints = async () => {
       }, studentToken),
     );
 
+    const generatedMockDraft = await runStep('POST /platform/ai/generate-assessment mock-test', () =>
+      request('POST', '/platform/ai/generate-assessment', {
+        provider: 'mock',
+        contentType: 'mock-test',
+        exam: 'SSC JE',
+        subject: 'Mathematics',
+        topic: 'Arithmetic',
+        title: 'AI Arithmetic Revision Mock',
+        type: 'topic-wise',
+        questionCount: 4,
+        durationMinutes: 20,
+        negativeMarking: 0.25,
+      }, adminToken),
+    );
+
+    if (!generatedMockDraft?.mockTest?.questions?.every((question) => question.explanation)) {
+      throw new Error('Generated mock draft must include explanations for every question');
+    }
+
     const test = await runStep('POST /tests', () =>
       request('POST', '/tests', {
-        title: 'Weekly Mock Test',
-        description: 'Smoke test mock exam',
-        category: 'SSC JE',
-        type: 'topic-wise',
-        durationMinutes: 45,
-        totalMarks: 2,
-        negativeMarking: 0.25,
+        ...generatedMockDraft.mockTest,
         course: course._id,
-        questions: [
-          { id: 'math_q1', questionText: '2 + 2', options: ['3', '4'], correctOption: 1, answer: 1, explanation: '2 + 2 = 4', marks: 1, topic: 'Arithmetic' },
-          { id: 'math_q2', questionText: '5 - 2', options: ['2', '3'], correctOption: 1, answer: 1, explanation: '5 - 2 = 3', marks: 1, topic: 'Arithmetic' },
-        ],
       }, adminToken),
     );
 
@@ -192,21 +201,32 @@ const testEndpoints = async () => {
     await runStep(`GET /tests/${test._id}`, () => request('GET', `/tests/${test._id}`));
     await runStep(`POST /tests/${test._id}/submit`, () =>
       request('POST', `/tests/${test._id}/submit`, {
-        answers: {
-          math_q1: 1,
-          math_q2: 1,
-        },
+        answers: Object.fromEntries(
+          generatedMockDraft.mockTest.questions.slice(0, 2).map((question) => [question.id, question.correctOption]),
+        ),
         startedAt: new Date().toISOString(),
       }, studentToken),
     );
 
+    const generatedQuizDraft = await runStep('POST /platform/ai/generate-assessment daily-quiz', () =>
+      request('POST', '/platform/ai/generate-assessment', {
+        provider: 'mock',
+        contentType: 'daily-quiz',
+        exam: 'SSC JE',
+        subject: 'General Knowledge',
+        topic: 'Static GK',
+        questionCount: 3,
+        quizDate: today,
+      }, adminToken),
+    );
+
+    if (!generatedQuizDraft?.dailyQuiz?.questions?.every((question) => question.explanation)) {
+      throw new Error('Generated daily quiz draft must include explanations for every question');
+    }
+
     const quiz = await runStep('POST /quiz/create', () =>
       request('POST', '/quiz/create', {
-        date: today,
-        questions: [
-          { prompt: 'Capital of France', options: ['Paris', 'Rome'], answer: 'Paris' },
-          { prompt: '3 x 3', options: ['6', '9'], answer: '9' },
-        ],
+        ...generatedQuizDraft.dailyQuiz,
       }, adminToken),
     );
 
@@ -214,7 +234,7 @@ const testEndpoints = async () => {
     await runStep('POST /quiz/submit', () =>
       request('POST', '/quiz/submit', {
         quizId: quiz._id,
-        answers: ['Paris', '9'],
+        answers: generatedQuizDraft.dailyQuiz.questions.map((question) => question.answer),
       }, studentToken),
     );
     await runStep(`GET /quiz/${quiz._id}/leaderboard`, () =>

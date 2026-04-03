@@ -1,4 +1,5 @@
 const { platformRepository } = require('../lib/repositories.js');
+const { generateAssessmentDraft } = require('../lib/ai-content.js');
 const {
   ApiError,
   asyncHandler,
@@ -88,6 +89,15 @@ const askAi = asyncHandler(async (req, res) => {
   return ok(res, aiResponse);
 });
 
+const generateAssessment = asyncHandler(async (req, res) => {
+  if (req.user?.role !== 'admin') {
+    throw new ApiError(403, 'Admin access required', { code: 'ADMIN_REQUIRED' });
+  }
+
+  const generated = await generateAssessmentDraft(req.body || {});
+  return ok(res, generated);
+});
+
 module.exports = {
   getOverview,
   seedPlatform,
@@ -95,4 +105,5 @@ module.exports = {
   subscribe,
   updateWatchProgress,
   askAi,
+  generateAssessment,
 };

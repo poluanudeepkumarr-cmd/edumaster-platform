@@ -4,6 +4,7 @@ import {
   AuthUser,
   CourseCard,
   DailyQuizResult,
+  GeneratedAssessmentDraft,
   LiveChatMessage,
   LiveBroadcastAdminState,
   LiveBroadcastViewerState,
@@ -19,6 +20,7 @@ import {
 
 const API_BASE = '/backend/api';
 const TOKEN_KEY = 'edumaster.jwt';
+const AUTH_EVENT_KEY = 'edumaster.auth.event';
 
 let authToken: string | null = null;
 
@@ -27,7 +29,21 @@ const readStoredToken = () => {
     return authToken;
   }
 
-  return authToken || window.localStorage.getItem(TOKEN_KEY);
+  const sessionToken = window.sessionStorage.getItem(TOKEN_KEY);
+  if (sessionToken) {
+    authToken = sessionToken;
+    return sessionToken;
+  }
+
+  const legacyToken = window.localStorage.getItem(TOKEN_KEY);
+  if (legacyToken) {
+    window.sessionStorage.setItem(TOKEN_KEY, legacyToken);
+    window.localStorage.removeItem(TOKEN_KEY);
+    authToken = legacyToken;
+    return legacyToken;
+  }
+
+  return authToken;
 };
 
 const saveToken = (token: string | null) => {
@@ -38,9 +54,27 @@ const saveToken = (token: string | null) => {
   }
 
   if (token) {
-    window.localStorage.setItem(TOKEN_KEY, token);
-  } else {
+    window.sessionStorage.setItem(TOKEN_KEY, token);
     window.localStorage.removeItem(TOKEN_KEY);
+  } else {
+    window.sessionStorage.removeItem(TOKEN_KEY);
+    window.localStorage.removeItem(TOKEN_KEY);
+  }
+};
+
+const emitAuthEvent = (event: { type: 'login' | 'logout'; userId?: string | null; sessionId?: string | null }) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(AUTH_EVENT_KEY, JSON.stringify({
+      ...event,
+      issuedAt: new Date().toISOString(),
+    }));
+    window.localStorage.removeItem(AUTH_EVENT_KEY);
+  } catch {
+    // Ignore storage event failures and rely on session polling fallback.
   }
 };
 
@@ -77,11 +111,16 @@ const extractErrorMessage = (payload: any, path: string) =>
   || payload?.details?.message
   || `Request failed for ${path}`;
 
-const handleUnauthorized = () => {
+const handleUnauthorized = (payload?: any) => {
   saveToken(null);
 
   if (typeof window !== 'undefined') {
-    window.dispatchEvent(new CustomEvent('edumaster:auth-expired'));
+    window.dispatchEvent(new CustomEvent('edumaster:auth-expired', {
+      detail: {
+        code: payload?.code || 'AUTH_EXPIRED',
+        message: payload?.message || 'Session expired. Please sign in again.',
+      },
+    }));
   }
 };
 
@@ -98,7 +137,7 @@ const request = async <T>(path: string, options: RequestInit = {}): Promise<T> =
 
   if (!response.ok) {
     if (response.status === 401) {
-      handleUnauthorized();
+      handleUnauthorized(payload);
       throw new Error('Session expired. Please sign in again.');
     }
     throw new Error(extractErrorMessage(payload, path));
@@ -120,7 +159,7 @@ const rootRequest = async <T>(path: string, options: RequestInit = {}): Promise<
 
   if (!response.ok) {
     if (response.status === 401) {
-      handleUnauthorized();
+      handleUnauthorized(payload);
       throw new Error('Session expired. Please sign in again.');
     }
     throw new Error(extractErrorMessage(payload, path));
@@ -157,6 +196,11 @@ export const EduService = {
     });
 
     saveToken(response.token);
+    emitAuthEvent({
+      type: 'login',
+      userId: response.user._id,
+      sessionId: response.user.session || null,
+    });
     return response;
   },
 
@@ -180,6 +224,7 @@ export const EduService = {
         await request<{ message: string }>('/auth/logout', { method: 'POST' });
       }
     } finally {
+      emitAuthEvent({ type: 'logout' });
       saveToken(null);
     }
   },
@@ -281,6 +326,27 @@ export const EduService = {
     return request<AiResponse>(`/platform/ai/ask`, {
       method: 'POST',
       body: JSON.stringify({ message }),
+    });
+  },
+
+  generateAssessmentDraft: async (payload: {
+    provider?: string;
+    contentType: 'mock-test' | 'daily-quiz';
+    exam?: string;
+    subject?: string;
+    topic?: string;
+    title?: string;
+    type?: string;
+    difficulty?: string;
+    questionCount?: number;
+    durationMinutes?: number;
+    negativeMarking?: number;
+    quizDate?: string;
+    instructions?: string;
+  }) => {
+    return request<GeneratedAssessmentDraft>(`/platform/ai/generate-assessment`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
     });
   },
 

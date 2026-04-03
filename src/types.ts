@@ -359,16 +359,14 @@ export interface AdminOverview {
   revenue: number;
   concurrentCapacityTarget: string;
   recentDeviceActivity: DeviceActivity[];
-  sampleCredentials: {
-    adminEmail: string;
-    adminPassword: string;
-    studentEmail: string;
-    studentPassword: string;
-  };
 }
 
 export interface PlatformOverview {
   user: AuthUser | null;
+  sampleCredentials: {
+    adminEmail: string;
+    adminPassword: string;
+  } | null;
   highlights: {
     concurrencyTarget: string;
     deploymentProfile: string;
@@ -394,6 +392,10 @@ export interface PlatformOverview {
   ai: {
     headline: string;
     prompts: string[];
+    generation?: {
+      defaultProvider: string;
+      providers: AiGenerationProviderOption[];
+    };
   };
   sessionActivity: {
     activeSessions: number;
@@ -401,12 +403,6 @@ export interface PlatformOverview {
     recentDeviceActivity: DeviceActivity[];
   } | null;
   adminOverview: AdminOverview | null;
-  sampleCredentials: {
-    adminEmail: string;
-    adminPassword: string;
-    studentEmail: string;
-    studentPassword: string;
-  };
 }
 
 export interface SavedTopic {
@@ -429,6 +425,35 @@ export interface AiResponse {
   message: string;
   answer: string;
   createdAt: string;
+}
+
+export interface AiGenerationProviderOption {
+  id: 'auto' | 'gemini' | 'openai' | 'mock' | string;
+  label: string;
+  available: boolean;
+  mode: 'live' | 'fallback' | 'unavailable' | string;
+  description: string;
+}
+
+export interface GeneratedAssessmentDraft {
+  provider: string;
+  model: string;
+  mode: 'live' | 'fallback' | string;
+  requestedProvider: string;
+  contentType: 'mock-test' | 'daily-quiz';
+  message: string;
+  mockTest: MockTest | null;
+  dailyQuiz: {
+    date: string;
+    questions: {
+      id?: string;
+      prompt: string;
+      options: string[];
+      answer: string;
+      explanation: string;
+      topic: string;
+    }[];
+  } | null;
 }
 
 export interface DailyQuizResult {

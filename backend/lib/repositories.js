@@ -18,14 +18,8 @@ const { buildPlatformSeed } = require('./platform-seed.js');
 const { decryptVideoId, normalizeYouTubeVideoId, buildSecureYouTubeEmbedUrl } = require('./video-security.js');
 const { issuePlaybackToken } = require('./private-video.js');
 const { appConfig } = require('./config.js');
+const { getAiGenerationProviders } = require('./ai-content.js');
 const { getLiveKitRoomName } = require('./livekit.js');
-
-const sampleCredentials = {
-  adminEmail: 'admin@edumaster.local',
-  adminPassword: 'Admin@123',
-  studentEmail: 'student@edumaster.local',
-  studentPassword: 'Student@123',
-};
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 const toNumber = (value, fallback = 0) => {
@@ -74,6 +68,89 @@ const pushIfMissing = (collection, item, idField = '_id') => {
   if (!collection.some((entry) => entry[idField] === item[idField])) {
     collection.push(clone(item));
   }
+};
+
+const ensureDefaultAdminUser = async () => {
+  const email = normalizeEmail(appConfig.adminEmail);
+  const name = String(appConfig.adminName || 'Demo Admin').trim() || 'Demo Admin';
+  const password = String(appConfig.adminPassword || 'Admin@123');
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  if (isPostgresMode()) {
+    const existing = await pgOne('SELECT * FROM users WHERE email = $1', [email], mapUserRow);
+    if (existing) {
+      return upsertPgUser({
+        ...existing,
+        name,
+        email,
+        password: passwordHash,
+        role: 'admin',
+        updated_at: nowIso(),
+      });
+    }
+
+    return upsertPgUser({
+      name,
+      email,
+      password: passwordHash,
+      role: 'admin',
+      device: null,
+      session: null,
+      badges: [{ code: 'mentor_mode', label: 'Mentor Mode' }],
+      streak: 0,
+      points: 0,
+      referral_code: 'ADMIN12',
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    });
+  }
+
+  if (isMongoMode()) {
+    const existing = await User.findOne({ email });
+    if (existing) {
+      existing.name = name;
+      existing.role = 'admin';
+      existing.password = passwordHash;
+      await existing.save();
+      return existing.toObject();
+    }
+
+    const createdUser = await User.create({
+      name,
+      email,
+      password: passwordHash,
+      role: 'admin',
+    });
+    return createdUser.toObject();
+  }
+
+  const existing = state.users.find((user) => user.email === email) || null;
+  if (existing) {
+    existing.name = name;
+    existing.role = 'admin';
+    existing.password = passwordHash;
+    existing.updated_at = nowIso();
+    return clone(existing);
+  }
+
+  const createdUser = {
+    _id: nextId('user'),
+    name,
+    email,
+    password: passwordHash,
+    role: 'admin',
+    device: null,
+    session: null,
+    streak: 0,
+    points: 0,
+    badges: [{ code: 'mentor_mode', label: 'Mentor Mode' }],
+    referral_code: 'ADMIN12',
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+
+  state.users.push(createdUser);
+  return clone(createdUser);
 };
 
 const getModuleLessons = (module) => Array.isArray(module?.lessons) ? module.lessons : [];
@@ -1849,7 +1926,9 @@ const ensurePlatformSeeded = async () => {
   })();
 
   try {
-    return await platformSeedPromise;
+    const status = await platformSeedPromise;
+    await ensureDefaultAdminUser();
+    return status;
   } finally {
     platformSeedPromise = null;
   }
@@ -3705,7 +3784,6 @@ const adminRepository = {
         .reduce((total, payment) => total + Number(payment.amount || 0), 0),
       concurrentCapacityTarget: '10K-100K users',
       recentDeviceActivity: getRecentDeviceActivity(data),
-      sampleCredentials,
     };
   },
 
@@ -4115,6 +4193,10 @@ const platformRepository = {
 
     return {
       user: safeUser,
+      sampleCredentials: appConfig.exposeSampleCredentials ? {
+        adminEmail: appConfig.adminEmail,
+        adminPassword: appConfig.adminPassword,
+      } : null,
       highlights: {
         concurrencyTarget: '10K+ concurrent learners',
         deploymentProfile: 'React + Node.js API + PostgreSQL/Firestore + Redis + S3 + WebSockets',
@@ -4154,6 +4236,7 @@ const platformRepository = {
           'Create a 7-day plan for SSC JE revision',
           'Recommend the next best mock test for me',
         ],
+        generation: getAiGenerationProviders(),
       },
       sessionActivity: userId ? {
         activeSessions: safeUser?.session ? 1 : 0,
@@ -4161,7 +4244,6 @@ const platformRepository = {
         recentDeviceActivity: getRecentDeviceActivity(data, userId),
       } : null,
       adminOverview,
-      sampleCredentials,
     };
   },
 
